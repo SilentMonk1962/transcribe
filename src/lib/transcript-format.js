@@ -6,8 +6,8 @@
  * those lines as the final contextual .txt deliverable.
  *
  * WHY ONE MODULE:
- *   context-scan.js numbers the lines it shows the model, and
- *   context-inject.js puts screen context back under those SAME numbers. If
+ *   The scan (lib/openai-context.js) numbers the lines it shows the model, and
+ *   context.js puts screen context back under those SAME numbers. If
  *   the two stages built the line list differently, a note would land under
  *   the wrong line. Both call transcriptEntries() from here.
  */
@@ -15,7 +15,7 @@
 const { formatTime } = require('./format');
 
 /**
- * Normalizes a Sarvam result (single-file or merged by merge-chunks.js) into
+ * Normalizes a Sarvam result (single-file or merged from chunks by transcribe.js) into
  * ordered transcript lines. Preference order:
  *   1. diarized_transcript.entries  (speaker + timing — the normal case)
  *   2. timestamps.chunks            (timing, no speaker)

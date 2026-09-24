@@ -4,7 +4,7 @@
  * format.js — shared formatting utilities used across multiple pipeline stages.
  *
  * Consolidates:
- *   - formatTime()   (transcript timings — transcript-format.js, context-scan.js)
+ *   - formatTime()   (transcript timings)
  *   - formatLabel()  (frame filenames — frame-capture.js)
  */
 

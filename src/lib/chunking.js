@@ -2,53 +2,17 @@
 const logger = require('./logger');
 
 /**
- * chunking.js — duration probing + fixed-length audio chunking for long
- * recordings, so no single Sarvam job (and therefore no single API key) has
- * to carry an oversized file.
+ * chunking.js — duration probing + fixed-length splitting of long audio, so
+ * no single Sarvam job (or key) carries an oversized file and a credit
+ * failure only costs the current chunk.
  *
- * WHY THIS EXISTS:
- *   One Sarvam key comfortably covers roughly one 60-minute session. A video
- *   longer than that is split into fixed 60-minute audio chunks BEFORE
- *   transcription, so:
- *     - each Sarvam job (transcribe.js) stays a normal, resumable size
- *     - if the primary key runs dry mid-recording, only the remaining
- *       chunks need the fallback key — completed chunks are untouched
- *     - a credit failure mid-file no longer means re-paying for the whole
- *       recording, same resume philosophy as every other stage here
+ * Layout:
+ *   audio/_chunks/<name>/manifest.json      chunk map + the session identity
+ *   audio/_chunks/<name>/<name>__part01.mp3  resolved ONCE by convert.js
  *
- * WHERE CHUNKS LIVE:
- *   audio/_chunks/<originalBaseName>/
- *     manifest.json                        (this recording's chunk map)
- *     <originalBaseName>__part01.mp3
- *     <originalBaseName>__part02.mp3
- *     ...
- *
- *   Deliberately NOT flat in audio/ — index.js's
- *   --transcribe-only resume does a flat directory scan for *.mp3 in
- *   audio/. Keeping chunk files in a subfolder means those scans never see
- *   them as independent items by accident (which would otherwise try to
- *   session-resolve "MyRecording__part02" as its own unrelated recording).
- *   Callers that DO need to see chunks (transcribe.js, index.js's
- *   --transcribe-only resume, merge-chunks.js) go through
- *   the explicit helpers below instead of a raw directory scan.
- *
- * SESSION IDENTITY:
- *   The manifest embeds the group/session-id ALREADY resolved (once, by
- *   convert.js, for the original recording) via session-paths.js's
- *   resolveSession(). Every chunk of one recording reuses that exact same
- *   session identity — chunks never independently call resolveSession() on
- *   their own filename. This matters because a recording with no
- *   extractable timestamp falls back to using its whole filename as the
- *   session-id (see session-paths.js); if each chunk re-resolved its own
- *   session from ITS OWN filename ("...__part01" vs "...__part02"), those
- *   would incorrectly become separate sessions. Reusing the manifest's
- *   pre-resolved session sidesteps that entirely, for every recording,
- *   timestamped or not.
- *
- * WHAT THIS FILE DOES NOT DO:
- *   It never calls Sarvam or OpenAI. It never merges transcripts
- *   (see src/merge-chunks.js for that). It only probes duration and splits
- *   audio — pure local ffmpeg/ffprobe work.
+ * Chunks never resolve their own session from their "__partNN" filename —
+ * they reuse the manifest's, so all parts land in one session.
+ * Merging the per-chunk transcripts happens in transcribe.js.
  */
 
 const fs = require('fs');
@@ -60,13 +24,8 @@ const ffprobePath = require('@ffprobe-installer/ffprobe').path;
 ffmpeg.setFfmpegPath(ffmpegPath);
 ffmpeg.setFfprobePath(ffprobePath);
 
-// Default 60 minutes — overridable via SARVAM_CHUNK_MINUTES in .env (see
-// .env.example). Read lazily (not at module load) so tests can override
-// process.env before calling into this module.
+// SARVAM_CHUNK_MINUTES (default 60; fractions allowed, e.g. 1.5 = 90 s).
 function chunkThresholdSeconds() {
-  // parseFloat, not parseInt — SARVAM_CHUNK_MINUTES is allowed to be
-  // fractional (e.g. "1.5" = 90 seconds); parseInt would silently truncate
-  // that to 1 instead of honoring it.
   const minutes = parseFloat(process.env.SARVAM_CHUNK_MINUTES || '60');
   return (Number.isFinite(minutes) && minutes > 0 ? minutes : 60) * 60;
 }
@@ -154,31 +113,6 @@ function listAllChunkManifests(audioDir) {
     if (m) manifests.push(m);
   }
   return manifests;
-}
-
-/**
- * Given an audio file path, determines whether it's a chunk (lives under
- * audio/_chunks/<baseName>/) and if so returns its manifest + own chunk
- * entry. Returns null for a normal, non-chunked audio file.
- *
- * @param {string} audioDir
- * @param {string} filePath
- * @returns {{manifest: object, chunkEntry: object}|null}
- */
-function findManifestForChunkFile(audioDir, filePath) {
-  const root = path.join(audioDir, CHUNKS_SUBDIR);
-  const resolved = path.resolve(filePath);
-  if (!resolved.startsWith(path.resolve(root) + path.sep)) return null;
-
-  const parentDir = path.basename(path.dirname(resolved));
-  const manifest = readManifest(audioDir, parentDir);
-  if (!manifest) return null;
-
-  const fileName = path.basename(resolved);
-  const chunkEntry = manifest.chunks.find((c) => c.file === fileName);
-  if (!chunkEntry) return null;
-
-  return { manifest, chunkEntry };
 }
 
 // ─── Splitting ──────────────────────────────────────────────────────────────
@@ -271,12 +205,8 @@ module.exports = {
   chunkThresholdSeconds,
   getAudioDurationSeconds,
   chunkDir,
-  manifestPath,
   hasManifest,
-  readManifest,
-  writeManifest,
   chunkAudioPaths,
   listAllChunkManifests,
-  findManifestForChunkFile,
   splitAudioIntoChunks,
 };

@@ -1,52 +1,36 @@
 'use strict';
 
 /**
- * input-walk.js — recursive video discovery under input/, shared by:
- *   - src/lib/budget.js       (probe durations for the pre-run cost estimate)
- *   - src/frame-capture.js    (locate a recording's source video even when it
- *                              lives in an input/<group>/ sub-folder)
+ * input-walk.js — video discovery under input/.
  *
- * WHY RECURSIVE:
- *   convert.js has always treated a sub-folder under input/ AS a group. A flat
- *   root-only lookup could never find a grouped video for frame capture. Both
- *   consumers now use this one walker so they agree on where videos live.
+ * A sub-folder of input/ IS the recording's group (input/kyc/x.mp4 → "kyc");
+ * videos at the input/ root belong to the default group.
  */
 
 const fs = require('fs');
 const path = require('path');
-const { VIDEO_EXTENSIONS } = require('./constants');
+
+/** Supported video containers. */
+const VIDEO_EXTENSIONS = ['.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v'];
 
 /**
- * Recursively finds every video file under inputDir (any depth), skipping
- * dotfiles/.DS_Store. Order is deterministic (depth-first, lexicographic).
+ * Every video under inputDir (any depth, dotfiles skipped), with its folder
+ * path relative to inputDir ('' = root). Deterministic order.
  *
  * @param {string} inputDir
- * @returns {string[]} absolute paths to video files
+ * @returns {Array<{fullPath: string, relDir: string, baseName: string}>}
  */
 function walkInputVideos(inputDir) {
-  return walkInputVideosDetailed(inputDir).map((v) => v.fullPath).sort();
-}
-
-/**
- * Like walkInputVideos(), but returns each hit with its folder path RELATIVE
- * to inputDir — convert.js needs that because a sub-folder under input/ IS a
- * group (the folder name becomes the group slug).
- *
- * @param {string} inputDir
- * @returns {Array<{fullPath: string, relDir: string}>}
- */
-function walkInputVideosDetailed(inputDir) {
   const out = [];
   if (!fs.existsSync(inputDir)) return out;
-
   const walk = (dir, relDir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name.startsWith('.')) continue; // skip .DS_Store, etc.
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name.startsWith('.')) continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         walk(full, path.join(relDir, entry.name));
       } else if (entry.isFile() && VIDEO_EXTENSIONS.includes(path.extname(entry.name).toLowerCase())) {
-        out.push({ fullPath: full, relDir });
+        out.push({ fullPath: full, relDir, baseName: path.basename(entry.name, path.extname(entry.name)) });
       }
     }
   };
@@ -55,19 +39,21 @@ function walkInputVideosDetailed(inputDir) {
 }
 
 /**
- * Recursively finds the source video whose basename (without extension)
- * matches `recordingBaseName`, under inputDir. Tries every known video
- * extension, in every subfolder.
+ * Finds a recording's source video. Looks in the recording's OWN group folder
+ * first, so two same-named videos in different groups never get mixed up;
+ * falls back to anywhere under input/.
  *
  * @param {string} inputDir
- * @param {string} recordingBaseName
- * @returns {string|null} absolute path, or null if not found
+ * @param {string} baseName     - recording filename without extension
+ * @param {string} group        - the recording's group
+ * @param {string} defaultGroup - group used for videos at the input/ root
+ * @returns {string|null}
  */
-function findInputVideoByName(inputDir, recordingBaseName) {
-  for (const full of walkInputVideos(inputDir)) {
-    if (path.basename(full, path.extname(full)) === recordingBaseName) return full;
-  }
-  return null;
+function findSourceVideo(inputDir, baseName, group, defaultGroup) {
+  const all = walkInputVideos(inputDir).filter((v) => v.baseName === baseName);
+  const ownFolder = group === defaultGroup ? '' : group;
+  const own = all.find((v) => v.relDir === ownFolder);
+  return (own || all[0])?.fullPath || null;
 }
 
-module.exports = { walkInputVideos, walkInputVideosDetailed, findInputVideoByName };
+module.exports = { VIDEO_EXTENSIONS, walkInputVideos, findSourceVideo };
