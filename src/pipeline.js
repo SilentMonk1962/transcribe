@@ -5,8 +5,8 @@ const logger = require('./lib/logger');
  * pipeline.js — runs everything, in one process:
  *
  *   0. status   what is done / transcribed / new (read-only, lib/status.js)
- *   0. ask      recordings whose source video is gone: finish without screen
- *               context, or hold them until the video is back?
+ *               (transcribed recordings whose video is gone are finished
+ *               without screen context — ₹0, one summary line, no prompt)
  *   0. budget   estimate for PENDING work only; y/N consent (skipped at ₹0)
  *   1. convert     video → audio                     (src/convert.js)
  *   2. transcribe  audio → English JSON (Sarvam)     (src/transcribe.js)
@@ -17,7 +17,6 @@ const logger = require('./lib/logger');
  *
  * Flags:
  *   --yes                   skip the budget prompt (automation)
- *   --allow-missing-video   finish video-less recordings without asking
  *
  * Exit codes: 0 ok · 1 error / not approved · 2 credits ran out (re-run to resume)
  *
@@ -29,12 +28,10 @@ require('dotenv').config();
 const convert = require('./convert');
 const transcribe = require('./transcribe');
 const context = require('./context');
-const { config } = require('./lib/config');
 const { snapshot } = require('./lib/status');
 const { estimateCost, formatEstimate, askYesNo, inr } = require('./lib/budget');
 
 const YES = process.argv.includes('--yes');
-const ALLOW_MISSING_FLAG = process.argv.includes('--allow-missing-video');
 
 const label = (r) => `${r.group}/${r.sessionId}/${r.baseName}`;
 
@@ -53,8 +50,7 @@ function printSummary(items) {
   logger.info(open.length ? ` ${open.length} recording(s) not finished:` : ' All recordings finished.');
   for (const r of open) {
     const why = r.state === 'new' ? 'not transcribed yet (failed, or waiting on chunk parts)'
-      : !r.videoPath ? 'held — source video missing from input/'
-        : 'screen context incomplete (a step failed)';
+      : 'screen context incomplete (a step failed)';
     logger.info(`   • ${label(r)} — ${why}`);
   }
   if (open.length) logger.info(' Re-run "npm run pipeline" to retry; finished work is skipped.');
@@ -72,20 +68,14 @@ async function main() {
   const counts = countStates(items);
   logger.info(`[status] ${counts.done} done · ${counts.transcribed} transcribed · ${counts.new} new`);
 
-  // ── Missing source videos: ask before anything is finalised ────────────────
-  const missing = items.filter((r) => r.state === 'transcribed' && !r.videoPath);
-  let allowMissingVideo = ALLOW_MISSING_FLAG;
-  if (missing.length && !allowMissingVideo) {
-    logger.warn(`\n[status] ${missing.length} recording(s) are ALREADY TRANSCRIBED — no re-transcription, no Sarvam cost.`);
-    logger.warn('[status] Only screen context is missing: their source video is not in ' + config.inputDir());
-    missing.forEach((r) => logger.warn(`   • ${label(r)}`));
-    logger.warn('   y = write their final transcripts now, without screen context (₹0)');
-    logger.warn('   N = hold them until you put the videos back in input/<group>/');
-    allowMissingVideo = await askYesNo('Finish them without screen context?');
-    logger.info(allowMissingVideo ? '[status] Will finish them without screen context.' : '[status] Holding them.');
+  // ── No source video → finished without screen context (₹0). One line, no list.
+  const noVideo = items.filter((r) => r.state === 'transcribed' && !r.videoPath).length;
+  if (noVideo) {
+    logger.info(`[status] ${noVideo} already-transcribed recording(s) have no video in input/ — ` +
+      'finishing them without screen context (₹0, no Sarvam).');
   }
 
-  const pending = items.filter((r) => r.state === 'new' || (r.state === 'transcribed' && (r.videoPath || allowMissingVideo)));
+  const pending = items.filter((r) => r.state !== 'done');
   if (pending.length === 0) {
     logger.info('\n[status] Nothing to do.');
     printSummary(items);
@@ -103,8 +93,9 @@ async function main() {
 
   // ── Budget consent (pending work only; skipped when nothing is billable) ──
   const estimate = await estimateCost(pending);
-  logger.info('\n' + formatEstimate(estimate, counts));
-  if (estimate.totalInr >= 0.01 && !YES) {
+  const billable = estimate.totalInr >= 0.01;
+  if (billable) logger.info('\n' + formatEstimate(estimate, counts));
+  if (billable && !YES) {
     const ok = await askYesNo(`This run is estimated to cost ≈ ${inr(estimate.totalInr)}. Continue?`);
     if (!ok) {
       logger.info('[budget] Not approved — nothing spent. (Non-interactive? pass --yes.)');
@@ -118,7 +109,7 @@ async function main() {
   logger.heading(' 2/3 transcribe ');
   await transcribe.run();
   logger.heading(' 3/3 context ');
-  await context.run({ allowMissingVideo });
+  await context.run();
 
   printSummary(snapshot());
 }

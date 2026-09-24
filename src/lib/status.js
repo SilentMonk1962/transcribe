@@ -10,7 +10,7 @@
  *   new         only the video exists                     → Sarvam + OpenAI
  *
  * Example: input/ holds A (done), B (new, 60 min); output/ holds C
- * (transcribed, video deleted) → A ₹0 · B ≈ ₹45.5 · C flagged "video missing".
+ * (transcribed, video deleted) → A ₹0 · B ≈ ₹45.5 · C finished without screen context, ₹0.
  */
 
 const fs = require('fs');
