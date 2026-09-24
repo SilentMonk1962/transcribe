@@ -6,8 +6,7 @@
  * WHY THIS EXISTS:
  *   Every stage previously read process.env (and applied its own default) at
  *   module-load time — INPUT_DIR, AUDIO_DIR, OUTPUT_DIR, NUM_SPEAKERS, and the
- *   provider model names each existed in 2–4 places ('deepseek-v4-pro' ×4,
- *   'gpt-5.6-luna' ×2, 'saaras:v3' ×2). If two stages ever disagreed on a
+ *   provider model names each existed in several places. If two stages ever disagreed on a
  *   default, behavior would drift silently. This module centralizes every
  *   knob; all accessors are LAZY (read at call time), so tests or callers can
  *   set process.env between calls and see the new value.
@@ -15,7 +14,6 @@
  * ALL DEFAULTS (with the .env.example documentation) live here and nowhere
  * else. Provider model names are overridable via env:
  *   - SARVAM_MODEL      (default 'saaras:v3')
- *   - DEEPSEEK_MODEL    (default 'deepseek-v4-pro')
  *   - OPENAI_MODEL      (default 'gpt-5.6-luna')
  */
 
@@ -57,10 +55,10 @@ const config = {
   numSpeakers: () => int('NUM_SPEAKERS', 8),
   /** Sarvam STT model. */
   sarvamModel: () => str('SARVAM_MODEL', 'saaras:v3'),
-  /** DeepSeek chat model used for notes draft/verify/patch stages. */
-  deepseekModel: () => str('DEEPSEEK_MODEL', 'deepseek-v4-pro'),
-  /** OpenAI vision model used for frame captioning (Stage 4). */
+  /** OpenAI model for BOTH the text-only context scan (stage 4) and frame description (stage 6). */
   openaiModel: () => str('OPENAI_MODEL', 'gpt-5.6-luna'),
+  /** Transcript lines sent per context-scan call (stage 4) — keeps each call well under the input limit. */
+  contextScanBatchLines: () => Math.max(1, int('CONTEXT_SCAN_BATCH_LINES', 150)),
 };
 
 /**

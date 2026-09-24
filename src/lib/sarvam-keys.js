@@ -4,8 +4,8 @@
  * sarvam-keys.js — single source of truth for Sarvam API keys.
  *
  * WHY THIS EXISTS:
- *   Every Sarvam-consuming stage (transcribe.js for codemix + translate,
- *   pure-english.js for the translate pass) used to each read their own env
+ *   Every Sarvam-consuming stage (historically transcribe.js and a
+ *   separate pure-english pass) used to each read their own env
  *   variables (SARVAM_API_KEY, SARVAM_API_KEY_FALLBACK, SARVAM_TRANSLATE_API_KEY).
  *   That fragmented the keys across stages and forced manual key swaps when
  *   credits ran out. This module is ONE key pool, read once, shared by every

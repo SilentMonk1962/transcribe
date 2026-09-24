@@ -4,7 +4,7 @@
  * session-paths.js — single source of truth for group + session resolution.
  *
  * WHY THIS FILE EXISTS:
- *   Every stage script (convert, transcribe, pure-english, meeting-notes) used
+ *   Every stage script (convert, transcribe, merge-chunks, context-*) used
  *   to write into a flat output/<stage>/ directory keyed only by filename.
  *   We are moving to a per-session layout so unrelated recordings — even
  *   within the same group — get their own isolated folder:
@@ -12,14 +12,19 @@
  *     output/
  *       <group>/
  *         <session-id>/
- *           transcripts/{codemix,translate,pure-english}/   (per-mode, same
- *                                                             file naming as before)
- *           screenshots/   (vision-assist Stage 3 targeted frames — src/vision-capture.js)
- *           captions/      (vision-assist Stage 4 per-frame captions — src/vision-caption.js)
- *           notes/         draft.md (Stage 2, meeting-notes.js) + flags.json,
- *                                     session-data.json (Stage 2, structured —
- *                                     feeds the XLSX export) + verification.json
- *                                     (Stage 2.5) + final.md (Stage 5, vision-patch.js)
+ *           <recording>-contextual.txt     FINAL deliverable — English transcript
+ *                                          with [SCREEN @ MM:SS] context inlined
+ *                                          (src/context-inject.js). After a
+ *                                          successful run this is the ONLY file
+ *                                          left in the session folder.
+ *           transcripts/translate/         INTERMEDIATE — Sarvam English JSON
+ *                                          (+ per-chunk parts). Deleted by
+ *                                          context-inject once the final exists.
+ *           _work/<recording>/             INTERMEDIATE — screen-context work:
+ *             scan.json                    stage 4 (src/context-scan.js)
+ *             frames/*.jpg + manifest.json stage 5 (src/frame-capture.js)
+ *             descriptions.json            stage 6 (src/frame-describe.js)
+ *                                          Deleted by context-inject.
  *         session-links.json        (same-day merge decisions, see below)
  *
  *   Group resolution and same-day collision handling live in
@@ -57,8 +62,7 @@ const OUTPUT_DIR = config.outputDir();
 
 // The catch-all bucket. Recordings that are NOT inside a sub-folder of input/
 // (see convert.js) fall here and are ALWAYS kept as isolated per-session
-// folders — they are never merged into a consolidated notes file (see
-// generate-xlsx.js / generate-md.js).
+// folders.
 const DEFAULT_GROUP = config.defaultGroup();
 
 // ─── Directory helper ─────────────────────────────────────────────────────────
@@ -82,35 +86,33 @@ function sessionDir(group, sessionId) {
 function transcriptsDir(group, sessionId) {
   return path.join(sessionDir(group, sessionId), 'transcripts');
 }
-/** @param {'codemix'|'translate'|'pure-english'} mode */
+/** @param {'translate'} mode — the only Sarvam pass the pipeline runs. */
 function transcriptsModeDir(group, sessionId, mode) {
   return path.join(transcriptsDir(group, sessionId), mode);
 }
-function screenshotsDir(group, sessionId) {
-  return path.join(sessionDir(group, sessionId), 'screenshots');
-}
-function captionsDir(group, sessionId) {
-  return path.join(sessionDir(group, sessionId), 'captions');
-}
-function notesDir(group, sessionId) {
-  return path.join(sessionDir(group, sessionId), 'notes');
-}
-/** Stage 2a cache — chronological topic mentions, feeds Stage 2b's merge step. */
-function topicIndexPath(group, sessionId) {
-  return path.join(notesDir(group, sessionId), 'topic-index.json');
-}
-/** Stage 2.5 output — advisory hallucination/omission report, never auto-applied. */
-function verificationPath(group, sessionId) {
-  return path.join(notesDir(group, sessionId), 'verification.json');
-}
 /**
- * Stage 2 structured data — machine-readable topics/problems/summary that
- * powers the XLSX export (src/generate-xlsx.js). Written by meeting-notes.js
- * (Stage 2), updated by vision-patch.js (Stage 5) with visual confirmations
- * and verification results.
+ * Per-recording scratch folder for the screen-context stages (4–6). Keyed by
+ * recording base name because one session can hold several recordings
+ * (same-day "same session" merges, see session-links.js).
  */
-function sessionDataPath(group, sessionId) {
-  return path.join(notesDir(group, sessionId), 'session-data.json');
+function workDir(group, sessionId, baseName) {
+  return path.join(sessionDir(group, sessionId), '_work', baseName);
+}
+/** Stage 4 output — lines that need screen context. */
+function scanPath(group, sessionId, baseName) {
+  return path.join(workDir(group, sessionId, baseName), 'scan.json');
+}
+/** Stage 5 output folder — extracted frames + manifest.json. */
+function framesDir(group, sessionId, baseName) {
+  return path.join(workDir(group, sessionId, baseName), 'frames');
+}
+/** Stage 6 output — one pen-picture description per captured frame. */
+function descriptionsPath(group, sessionId, baseName) {
+  return path.join(workDir(group, sessionId, baseName), 'descriptions.json');
+}
+/** FINAL deliverable — the contextual transcript (stage 7). */
+function contextualTranscriptPath(group, sessionId, baseName) {
+  return path.join(sessionDir(group, sessionId), `${baseName}-contextual.txt`);
 }
 
 /**
@@ -141,7 +143,7 @@ function listSessionsInGroup(group) {
 /**
  * Every session on disk across all groups, as {group, sessionId} pairs.
  * Replaces the identical double-loop that used to be copy-pasted in
- * vision-capture.js, vision-caption.js and vision-patch.js.
+ * the per-stage discovery loops.
  * @returns {Array<{group: string, sessionId: string}>}
  */
 function listAllSessions() {
@@ -154,27 +156,29 @@ function listAllSessions() {
   return sessions;
 }
 
+// Chunk transcripts (<name>__partNN.json) live next to the merged file —
+// they are merge-chunks.js inputs, never recordings in their own right.
+const CHUNK_PART_REGEX = /__part\d+$/;
+
 /**
- * Walks output/<group>/<session-id>/transcripts/pure-english/*.txt across
- * every group and session on disk. Single source of truth for "what pure
- * English transcripts exist, and which group/session do they belong to" —
- * used by both meeting-notes.js (Stage 2) and verify-notes.js (Stage 2.5) so
- * this discovery loop isn't duplicated a second time.
+ * Every recording with a finished (merged) English transcript on disk, as
+ * {group, sessionId, baseName, jsonPath}. Single discovery loop for stages
+ * 4–7 so none of them re-implements it.
  *
- * @returns {Array<{txtPath: string, group: string, sessionId: string}>}
+ * @returns {Array<{group: string, sessionId: string, baseName: string, jsonPath: string}>}
  */
-function listPureEnglishTranscripts() {
+function listTranslatedRecordings() {
   const results = [];
-  for (const group of listAllGroups()) {
-    for (const sessionId of listSessionsInGroup(group)) {
-      const peDir = transcriptsModeDir(group, sessionId, 'pure-english');
-      if (!fs.existsSync(peDir)) continue;
-      const txtFiles = fs.readdirSync(peDir)
-        .filter((f) => f.endsWith('-pure-english.txt'))
-        .sort();
-      for (const f of txtFiles) {
-        results.push({ txtPath: path.join(peDir, f), group, sessionId });
-      }
+  for (const { group, sessionId } of listAllSessions()) {
+    const dir = transcriptsModeDir(group, sessionId, 'translate');
+    if (!fs.existsSync(dir)) continue;
+    const baseNames = fs.readdirSync(dir)
+      .filter((f) => f.endsWith('.json'))
+      .map((f) => path.basename(f, '.json'))
+      .filter((b) => !CHUNK_PART_REGEX.test(b))
+      .sort();
+    for (const baseName of baseNames) {
+      results.push({ group, sessionId, baseName, jsonPath: path.join(dir, `${baseName}.json`) });
     }
   }
   return results;
@@ -188,16 +192,15 @@ module.exports = {
   sessionDir,
   transcriptsDir,
   transcriptsModeDir,
-  screenshotsDir,
-  captionsDir,
-  notesDir,
-  topicIndexPath,
-  verificationPath,
-  sessionDataPath,
+  workDir,
+  scanPath,
+  framesDir,
+  descriptionsPath,
+  contextualTranscriptPath,
   listAllGroups,
   listSessionsInGroup,
   listAllSessions,
-  listPureEnglishTranscripts,
+  listTranslatedRecordings,
   // Re-exported from session-links.js (kept for backward compatibility —
   // see the require at the top of this file).
   ...sessionLinks,

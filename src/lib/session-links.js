@@ -18,7 +18,7 @@ const logger = require('./logger');
  *   The core contract: resolveSession() is called once per recording by the
  *   FIRST stage that sees it (convert.js, with the folder-derived group).
  *   That decision is persisted to output/<group>/session-links.json, so all
- *   later stages (transcribe, pure-english, merge-chunks, …) calling
+ *   later stages (transcribe, merge-chunks, context-*, …) calling
  *   resolveSession() with only the filename get the exact same group and
  *   effective session-id without re-prompting.
  */
@@ -34,7 +34,7 @@ const GROUPS_CONFIG_PATH = path.join(PROJECT_ROOT, 'groups.config.json');
 // Matches the raw timestamp embedded in recording filenames, e.g. "20260708_110318".
 const SESSION_ID_REGEX = /(\d{8}_\d{6})/;
 
-// ─── Grouping (moved here from meeting-notes.js — see session-paths.js header) ─
+// ─── Grouping (see session-paths.js header) ─
 
 /**
  * Loads groups.config.json. Falls back to a single "ungrouped" bucket for
@@ -237,7 +237,7 @@ function promptSameDay(newSessionId, existingSessionId, group) {
  * recording comes from the sub-folder it sits in — NOT from its filename. A
  * first-stage call to resolveSession() with { explicitGroup } persists that
  * group under output/<group>/session-links.json. But later stages (transcribe,
- * pure-english) call resolveSession() with only the filename and no folder, so
+ * merge-chunks) call resolveSession() with only the filename and no folder, so
  * they need to locate which group's session-links file already holds this
  * session-id in order to honor the folder-derived group.
  *

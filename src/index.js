@@ -4,35 +4,26 @@ const logger = require('./lib/logger');
 /**
  * index.js — Stage 1+2 orchestrator: video → audio → transcript
  *
- * This is ONE stage of the full modular pipeline (see src/pipeline.js for
- * the complete stage list run end-to-end — vision-assist Stages 2 through 5,
- * including the 2026-07-16 hallucination-resilience additions, live there,
- * not duplicated here). Each stage is independently runnable and has its
- * own resume logic:
+ * These are stages 1–2 of the full pipeline (see src/pipeline.js for the
+ * complete list run end-to-end). Each stage is independently runnable and
+ * has its own resume logic:
  *
  *   1. convert       (this file, --convert-only)    video  → audio
- *   2. transcribe    (this file, --transcribe-only)  audio  → English transcript
- *                     (translate-only by default; the Hinglish codemix pass is
- *                     opt-in via SARVAM_TRANSLATE_ONLY=0 — see lib/modes.js)
- *   3. merge-chunks  (src/merge-chunks.js)          stitches chunked recordings
- *                     back into one continuous transcript (no-op otherwise)
- *   4. pure-english  (src/pure-english.js)            →  clean English transcript
- *   5. meeting-notes (src/meeting-notes.js)             →  structured notes,
- *                     grouped via groups.config.json so unrelated calls never mix
- *
- * (The old fixed-90-second screenshot sweep, src/screenshots.js, was removed
- * 2026-07-16 — redundant once vision-assist's Stage 3 lets the model itself
- * flag exactly which moments need a screenshot, rather than sweeping blindly.)
+ *   2. transcribe    (this file, --transcribe-only)  audio  → English transcript JSON
+ *   3–7. merge-chunks → context-scan → frame-capture → frame-describe →
+ *        context-inject  (see src/pipeline.js)
  *
  * Usage:
- *   node src/index.js                   → convert videos → transcribe (both modes)
+ *   node src/index.js                   → convert videos → transcribe
  *   node src/index.js --convert-only    → only run video-to-audio conversion
  *   node src/index.js --transcribe-only → skip conversion, transcribe existing ./audio/ files
  *   npm run pipeline                    → run the full pipeline in one go (see src/pipeline.js)
  *
  * Drop your video files (.mp4, .mov, .mkv, etc.) into ./input/ before running.
- * Transcripts are saved under output/<group>/<session-id>/transcripts/{codemix,translate}/
- * — group and session-id are resolved automatically (see src/lib/session-paths.js).
+ * Sarvam JSON is saved under output/<group>/<session-id>/transcripts/translate/
+ * (an intermediate — context-inject.js deletes it after writing the final
+ * <name>-contextual.txt). Group and session-id are resolved automatically
+ * (see src/lib/session-paths.js).
  */
 
 require('dotenv').config(); // Load .env variables into process.env
@@ -107,6 +98,12 @@ async function main() {
   }
 
   if (audioPaths.length === 0) {
+    // As a single pipeline stage, "nothing new" is not an error — earlier
+    // runs may have finished everything (or only legacy transcripts remain).
+    if (CONVERT_ONLY || TRANSCRIBE_ONLY) {
+      logger.info('\n[info] No audio files to process — nothing to do for this stage.');
+      return;
+    }
     logger.error('\n[error] No audio files to process. Add video files to ./input/ and re-run.');
     process.exit(1);
   }
@@ -131,9 +128,8 @@ async function main() {
   // ── Summary ─────────────────────────────────────────────────────────────────
   logger.info('\n============================================================');
   logger.info(' All done!');
-  logger.info(`\n Transcripts saved under: output/<group>/<session-id>/transcripts/`);
-  logger.info('   translate/  — English translation (*.json + *_translate.txt)  [default pass]');
-  logger.info('   codemix/    — Hindi+English transcript, only when SARVAM_TRANSLATE_ONLY=0');
+  logger.info(`\n English transcript JSON saved under: output/<group>/<session-id>/transcripts/translate/`);
+  logger.info(' Run "npm run pipeline" (or the remaining stage scripts) for the contextual transcript.');
   logger.info('============================================================\n');
 }
 

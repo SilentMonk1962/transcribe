@@ -2,36 +2,33 @@
 const logger = require('./lib/logger');
 
 /**
- * merge-chunks.js — new pipeline stage, runs between transcribe and
- * pure-english (see src/pipeline.js). Stitches the per-chunk transcripts
+ * merge-chunks.js — pipeline stage 3, runs between transcribe and
+ * context-scan (see src/pipeline.js). Stitches the per-chunk transcripts
  * produced by transcribe.js for a >60-minute recording (see
  * src/lib/chunking.js) back into ONE continuous transcript, written to the
  * exact path a normal, non-chunked session would use. This is deliberate:
- * it means pure-english.js, meeting-notes.js, verify-notes.js, and every
- * vision-assist stage need ZERO changes to handle chunked recordings — they
- * only ever see one codemix/translate transcript per session, exactly like
- * before chunking existed.
+ * it means every screen-context stage (context-scan, frame-capture,
+ * frame-describe, context-inject) needs ZERO changes to handle chunked
+ * recordings — they only ever see one English transcript per recording.
  *
  * WHAT IT DOES, per chunk manifest (audio/_chunks/<name>/manifest.json):
- *   1. For each mode (codemix, translate), waits until every chunk's own
- *      transcript JSON exists (written by transcribe.js under
- *      transcripts/<mode>/<name>__partNN.json). If any are still missing —
+ *   1. Waits until every chunk's own English transcript JSON exists
+ *      (written by transcribe.js under
+ *      transcripts/translate/<name>__partNN.json). If any are still missing —
  *      e.g. the run stopped partway on a credit error with no fallback
- *      configured — this manifest+mode is skipped for now, not failed, so
+ *      configured — this manifest is skipped for now, not failed, so
  *      a later re-run (after transcribe finishes) picks it up cleanly.
  *   2. Concatenates the chunks' diarized entries and timestamp arrays in
  *      order, offsetting every timestamp by that chunk's startOffsetSeconds
  *      so the merged transcript reads as one continuous timeline instead
  *      of restarting at 00:00 every ~60 minutes.
- *   3. Writes the merged JSON + formatted .txt to
- *      transcripts/<mode>/<originalBaseName>.json / _<mode>.txt — same
- *      location and shape transcribe.js would use for a single, non-chunked
- *      file, via the same formatTranscript() it already uses (imported, not
- *      duplicated).
+ *   3. Writes the merged JSON to transcripts/translate/<originalBaseName>.json
+ *      — same location and shape transcribe.js uses for a single, non-chunked
+ *      file.
  *
- * RESUME: if the merged output already exists, that manifest+mode is
- * skipped — merging never re-runs once done, same philosophy as every
- * other stage in this project.
+ * RESUME: if the merged output — or the recording's final
+ * <name>-contextual.txt — already exists, that manifest is skipped. Merging
+ * never re-runs once done, same philosophy as every other stage.
  *
  * KNOWN LIMITATION — speaker IDs across chunk boundaries: each chunk was
  * transcribed as an independent Sarvam job, so diarization speaker_id
@@ -52,13 +49,12 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const { config } = require('./lib/config');
-const { transcriptsModeDir, ensureDir } = require('./lib/session-paths');
-const { formatTranscript } = require('./transcribe');
+const { transcriptsModeDir, contextualTranscriptPath, ensureDir } = require('./lib/session-paths');
 const { listAllChunkManifests } = require('./lib/chunking');
-const { translationModes } = require('./lib/modes');
 
 const AUDIO_DIR = config.audioDir();
-const MODES = translationModes();
+// The only Sarvam pass the pipeline runs (see transcribe.js header).
+const MODE = 'translate';
 
 /**
  * Returns a deep copy of one chunk's parsed transcript JSON with every
@@ -95,8 +91,8 @@ function offsetTimestamps(chunkResult, offsetSeconds) {
 /**
  * Merges N already offset-adjusted chunk transcript JSONs (in chunk order)
  * into one combined result object shaped exactly like a normal single-file
- * Sarvam result — same top-level keys formatTranscript() already knows how
- * to read, so nothing downstream needs to change.
+ * Sarvam result — same top-level keys lib/transcript-format.js already
+ * knows how to read, so nothing downstream needs to change.
  *
  * @param {object[]} chunkResults - in chunk order, already run through offsetTimestamps()
  * @returns {object}
@@ -129,7 +125,7 @@ function mergeChunkResults(chunkResults) {
   }
 
   // Only include these keys if at least one chunk actually had them —
-  // mirrors what a real single-file Sarvam result looks like (formatTranscript()
+  // mirrors what a real single-file Sarvam result looks like (the formatter
   // already handles either shape being absent).
   if (!hasAnyDiarized) delete merged.diarized_transcript;
   if (!hasAnyTimestampChunks) delete merged.timestamps;
@@ -139,19 +135,22 @@ function mergeChunkResults(chunkResults) {
 }
 
 /**
- * Attempts to merge one manifest's chunks for one mode.
+ * Attempts to merge one manifest's chunks.
  *
  * @param {object} manifest
- * @param {'codemix'|'translate'} mode
  * @returns {'merged'|'skipped-done'|'waiting'}
  */
-function mergeOneManifestMode(manifest, mode) {
+function mergeOneManifest(manifest) {
   const { originalBaseName, group, effectiveSessionId, chunks } = manifest;
-  const modeDir = transcriptsModeDir(group, effectiveSessionId, mode);
-  ensureDir(modeDir);
 
+  // ── Resume: final deliverable exists → intermediates were cleaned on purpose
+  if (fs.existsSync(contextualTranscriptPath(group, effectiveSessionId, originalBaseName))) {
+    return 'skipped-done';
+  }
+
+  const modeDir = transcriptsModeDir(group, effectiveSessionId, MODE);
+  ensureDir(modeDir);
   const mergedJsonPath = path.join(modeDir, `${originalBaseName}.json`);
-  const mergedTxtPath = path.join(modeDir, `${originalBaseName}_${mode}.txt`);
 
   // ── Resume: already merged ──────────────────────────────────────────────
   if (fs.existsSync(mergedJsonPath)) {
@@ -166,7 +165,7 @@ function mergeOneManifestMode(manifest, mode) {
     const chunkJsonPath = path.join(modeDir, `${chunkBaseName}.json`);
     if (!fs.existsSync(chunkJsonPath)) {
       logger.info(
-        `  [merge-chunks] Waiting on chunk ${chunk.index}/${chunk.total} (${mode}) for ` +
+        `  [merge-chunks] Waiting on chunk ${chunk.index}/${chunk.total} for ` +
         `"${originalBaseName}" — ${chunkBaseName}.json not transcribed yet.`
       );
       return 'waiting';
@@ -187,10 +186,7 @@ function mergeOneManifestMode(manifest, mode) {
   const merged = mergeChunkResults(chunkResults);
   fs.writeFileSync(mergedJsonPath, JSON.stringify(merged, null, 2), 'utf8');
 
-  const formatted = formatTranscript(merged, `${originalBaseName}.mp3`, mode);
-  fs.writeFileSync(mergedTxtPath, formatted, 'utf8');
-
-  logger.info(`  [merge-chunks] ✓ Merged ${orderedChunks.length} chunk(s) → ${originalBaseName}_${mode}.txt`);
+  logger.info(`  [merge-chunks] ✓ Merged ${orderedChunks.length} chunk(s) → ${originalBaseName}.json`);
   return 'merged';
 }
 
@@ -214,12 +210,10 @@ async function main() {
 
   for (const manifest of manifests) {
     logger.info(`── ${manifest.originalBaseName} (${manifest.chunks.length} chunk(s)) ──`);
-    for (const mode of MODES) {
-      const result = mergeOneManifestMode(manifest, mode);
-      if (result === 'merged') mergedCount++;
-      if (result === 'waiting') waitingCount++;
-      if (result === 'skipped-done') skippedCount++;
-    }
+    const result = mergeOneManifest(manifest);
+    if (result === 'merged') mergedCount++;
+    if (result === 'waiting') waitingCount++;
+    if (result === 'skipped-done') skippedCount++;
   }
 
   logger.info('\n============================================================');
@@ -232,7 +226,7 @@ async function main() {
   logger.info('============================================================\n');
 }
 
-module.exports = { main, mergeOneManifestMode, mergeChunkResults, offsetTimestamps };
+module.exports = { main, mergeOneManifest, mergeChunkResults, offsetTimestamps };
 
 if (require.main === module) {
   main().catch((err) => {

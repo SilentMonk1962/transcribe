@@ -3,28 +3,25 @@ const logger = require('./logger');
 
 /**
  * budget.js — pre-run spend estimate + interactive budget consent for the
- * full pipeline (src/pipeline.js). Built 2026-08-06 per explicit user request:
- * "take a keyed consent on the CLI from the user about the budget… mention
- * Sarvam saaras v3 at ₹45/hour, DeepSeek v4 Pro pricing, and OpenAI Luna
- * pricing, then ask: 'This transcription is estimated to cost xyz cents.
- * Would you like me to continue?' — only run the pipeline if the user says yes."
+ * full pipeline (src/pipeline.js). The pipeline only proceeds on an explicit
+ * "yes": "This transcription is estimated to cost xyz cents. Would you like
+ * me to continue?"
  *
  * WHAT IT ESTIMATES (all rough, deliberately simple):
- *   - Sarvam  : audio-minutes actually billed. Depends on WHICH passes run —
- *               translationModes() from lib/modes.js is the single source of
- *               truth, so the estimate can never disagree with what
- *               transcribe.js will actually do. Translate-only (the default)
- *               bills 1× audio; the optional codemix pass bills 2×.
- *   - DeepSeek: token-based, 3 calls per session (Stage 2a index + 2b draft +
- *               2.5 verify) — input ≈ spoken tokens per minute of audio plus
- *               prompt overhead, output ≈ notes/structured data length.
- *   - OpenAI  : captioning only runs if Stage 2 raises vision flags, which
- *               cannot be known before notes exist. So the total includes an
- *               ASSUMED number of flagged frames per session, explicitly
- *               labeled as an assumption. Per-frame cost is tiny.
+ *   - Sarvam : billed audio-minutes × ₹45/hr (one English pass per recording).
+ *   - OpenAI scan (stage 4, text only): input ≈ spoken tokens per minute of
+ *              audio + prompt overhead per batch; output ≈ a small JSON list.
+ *   - OpenAI vision (stage 6): how many lines need the screen cannot be known
+ *              before the scan runs, so the total uses an ASSUMED number of
+ *              frames per session, explicitly labeled as an assumption.
  *
- * ALL RATES AND HEURISTICS are overridable via .env (see .env.example) so a
- * provider price change never needs a code change.
+ * Example (one 60-min recording, defaults):
+ *   Sarvam  60 min × ₹45/hr                       ≈ ₹45
+ *   Scan    ~13.2k in + ~0.5k out tokens          ≈ ₹0.3
+ *   Vision  10 assumed frames × ~0.75k tokens     ≈ ₹0.2
+ *   Total                                         ≈ ₹45.5
+ *
+ * ALL RATES AND HEURISTICS are overridable via .env (see .env.example).
  *
  * Non-interactive safety: when stdin is not a TTY, askBudgetConsent()
  * refuses (returns false) instead of defaulting to proceed — an unattended
@@ -38,12 +35,10 @@ const path = require('path');
 const readline = require('readline');
 const { config } = require('./config');
 const { getAudioDurationSeconds } = require('./chunking');
-const { translationModes } = require('./modes');
 
-// ─── Rates (USD unless noted; per 1M tokens for the LLMs) ─────────────────────
-// Aug-2026 list prices — sources cross-checked in HANDOVER.md (§ Budget
-// consent). Every value is overridable via .env; the env names are the ones
-// documented in .env.example.
+// ─── Rates (USD unless noted; per 1M tokens for OpenAI) ───────────────────────
+// Every value is overridable via .env; the env names are the ones documented
+// in .env.example.
 
 function num(env, fallback) {
   const v = process.env[env];
@@ -54,8 +49,6 @@ function num(env, fallback) {
 const RATES = {
   sarvamInrPerHour: num('SARVAM_PRICE_PER_HOUR_INR', 45),
   usdInr: num('USD_INR_RATE', 95.4),
-  deepseekInputPerM: num('DEEPSEEK_PRICE_INPUT_PER_M', 0.435),
-  deepseekOutputPerM: num('DEEPSEEK_PRICE_OUTPUT_PER_M', 0.87),
   openaiInputPerM: num('OPENAI_PRICE_INPUT_PER_M', 0.20),
   openaiOutputPerM: num('OPENAI_PRICE_OUTPUT_PER_M', 1.20),
 };
@@ -63,21 +56,20 @@ const RATES = {
 // ─── Estimation heuristics (see file header — rough by design) ───────────────
 
 const HEURISTICS = {
-  // Rough speaking pace — ~180 words per minute of audio. The transcript
-  // feeding DeepSeek is dense Hindi-English, so this is a floor, not exact.
+  // Rough speaking pace — tokens of transcript per minute of audio.
   spokenTokensPerMin: num('SPOKEN_TOKENS_PER_MIN', 180),
-  // Index + draft + verification passes (Stage 2a/2b/2.5) — see HANDOVER.md
-  // § Hallucination resilience. Was 1 call before that build; update this if
-  // the per-session call count ever changes again.
-  deepseekCallsPerSession: num('DEEPSEEK_CALLS_PER_SESSION', 3),
-  deepseekOverheadTokensPerCall: num('DEEPSEEK_PROMPT_OVERHEAD_TOKENS', 1500),
-  deepseekOutputTokensPerSession: num('DEEPSEEK_OUTPUT_TOKENS_PER_SESSION', 4000),
-  // Vision flags can't be known before notes exist, so this is an explicit
-  // ASSUMPTION: 2 flagged frames per session, labeled as such in the prompt.
-  openaiAssumedFramesPerSession: num('OPENAI_ASSUMED_FRAMES_PER_SESSION', 2),
+  // Stage 4 — system prompt + line numbering/timing per batch call.
+  scanOverheadTokensPerBatch: num('SCAN_PROMPT_OVERHEAD_TOKENS', 1200),
+  // Stage 4 — roughly how many transcript lines one minute of audio yields
+  // (used only to estimate the number of batch calls).
+  scanLinesPerMin: num('SCAN_LINES_PER_MIN', 4),
+  scanOutputTokensPerSession: num('SCAN_OUTPUT_TOKENS_PER_SESSION', 500),
+  // Stage 6 — frames can't be known before the scan, so this is an explicit
+  // ASSUMPTION, labeled as such in the prompt.
+  openaiAssumedFramesPerSession: num('OPENAI_ASSUMED_FRAMES_PER_SESSION', 10),
   openaiImageInputTokens: num('OPENAI_IMAGE_INPUT_TOKENS', 500),
-  openaiTextInputTokensPerFrame: num('OPENAI_TEXT_INPUT_TOKENS_PER_FRAME', 50),
-  openaiCaptionOutputTokens: num('OPENAI_CAPTION_OUTPUT_TOKENS', 150),
+  openaiTextInputTokensPerFrame: num('OPENAI_TEXT_INPUT_TOKENS_PER_FRAME', 150),
+  openaiCaptionOutputTokens: num('OPENAI_CAPTION_OUTPUT_TOKENS', 100),
 };
 
 /**
@@ -90,9 +82,6 @@ const HEURISTICS = {
  *   display strings, and the raw inputs used (for the breakdown printout).
  */
 async function estimateCost(videoPaths) {
-  const modes = translationModes();
-  const passes = modes.length;
-
   let totalSeconds = 0;
   let probed = 0;
   for (const v of videoPaths) {
@@ -106,48 +95,46 @@ async function estimateCost(videoPaths) {
 
   const sessions = videoPaths.length;
   const totalMinutes = totalSeconds / 60;
-  const avgMinutes = sessions > 0 ? totalMinutes / sessions : 0;
 
   // ── Sarvam: billed audio-minutes × ₹45/hr, converted to USD ────────────────
-  const sarvamBilledMinutes = totalMinutes * passes;
+  const sarvamBilledMinutes = totalMinutes;
   const sarvamInr = (sarvamBilledMinutes / 60) * RATES.sarvamInrPerHour;
   const sarvamUsd = sarvamInr / RATES.usdInr;
 
-  // ── DeepSeek: 3 calls/session, input ≈ transcript + overhead ───────────────
-  const transcriptTokensPerSession = avgMinutes * HEURISTICS.spokenTokensPerMin;
-  const deepseekInputTokensPerSession =
-    HEURISTICS.deepseekCallsPerSession *
-    (transcriptTokensPerSession + HEURISTICS.deepseekOverheadTokensPerCall);
-  const deepseekUsd =
-    sessions * (
-      (deepseekInputTokensPerSession / 1e6) * RATES.deepseekInputPerM +
-      (HEURISTICS.deepseekOutputTokensPerSession / 1e6) * RATES.deepseekOutputPerM
-    );
+  // ── OpenAI scan (stage 4): whole transcript once + per-batch overhead ──────
+  const scanBatches = sessions > 0
+    ? Math.max(sessions, Math.ceil((totalMinutes * HEURISTICS.scanLinesPerMin) / config.contextScanBatchLines()))
+    : 0;
+  const scanInputTokens =
+    totalMinutes * HEURISTICS.spokenTokensPerMin + scanBatches * HEURISTICS.scanOverheadTokensPerBatch;
+  const scanOutputTokens = sessions * HEURISTICS.scanOutputTokensPerSession;
+  const scanUsd =
+    (scanInputTokens / 1e6) * RATES.openaiInputPerM +
+    (scanOutputTokens / 1e6) * RATES.openaiOutputPerM;
 
-  // ── OpenAI Luna: only if vision flags fire — assumed frames, labeled ───────
+  // ── OpenAI vision (stage 6): assumed frames, labeled ───────────────────────
   const openaiFrames = sessions * HEURISTICS.openaiAssumedFramesPerSession;
-  const openaiInputTokensPerFrame =
+  const visionInputTokensPerFrame =
     HEURISTICS.openaiImageInputTokens + HEURISTICS.openaiTextInputTokensPerFrame;
-  const openaiUsd =
+  const visionUsd =
     openaiFrames * (
-      (openaiInputTokensPerFrame / 1e6) * RATES.openaiInputPerM +
+      (visionInputTokensPerFrame / 1e6) * RATES.openaiInputPerM +
       (HEURISTICS.openaiCaptionOutputTokens / 1e6) * RATES.openaiOutputPerM
     );
 
-  const totalUsd = sarvamUsd + deepseekUsd + openaiUsd;
+  const totalUsd = sarvamUsd + scanUsd + visionUsd;
   const totalInr = totalUsd * RATES.usdInr;
 
   return {
-    modes,
-    passes,
     sessions,
     probed,
     totalMinutes,
     sarvamBilledMinutes,
     sarvamInr,
     sarvamUsd,
-    deepseekUsd,
-    openaiUsd,
+    scanBatches,
+    scanUsd,
+    visionUsd,
     openaiFrames,
     totalUsd,
     totalInr,
@@ -176,25 +163,21 @@ function formatInr(inr) {
  * @returns {string}
  */
 function formatEstimate(e) {
-  const deepseekModel = config.deepseekModel();
   const openaiModel = config.openaiModel();
+  const toInr = (usd) => formatInr(usd * RATES.usdInr);
   const content = [
     '  ESTIMATED SPEND FOR THIS RUN (rough estimate)  ',
     '─────────────────────────────────────────────────',
     `  Recordings : ${e.sessions}  ·  Audio: ${e.totalMinutes.toFixed(0)} min total (${e.probed}/${e.sessions} probed)`,
-    `  Passes     : ${e.passes} (${e.modes.join(' + ')})`,
     '─────────────────────────────────────────────────',
-    `  Sarvam saaras:v3  ₹${RATES.sarvamInrPerHour}/hour`,
+    `  Sarvam saaras:v3  ₹${RATES.sarvamInrPerHour}/hour  (English pass only)`,
     `    × ${e.sarvamBilledMinutes.toFixed(0)} billed audio-min → ${formatInr(e.sarvamInr)} (≈ $${e.sarvamUsd.toFixed(2)})`,
-    `  DeepSeek ${deepseekModel}`,
-    `    $${RATES.deepseekInputPerM}/M in + $${RATES.deepseekOutputPerM}/M out`,
-    `    ≈ $${e.deepseekUsd.toFixed(3)}  (3 calls/session: index + draft + verify)`,
-    `  OpenAI ${openaiModel}  (only if vision checks fire)`,
-    `    $${RATES.openaiInputPerM}/M in + $${RATES.openaiOutputPerM}/M out`,
-    `    ≈ $${e.openaiUsd.toFixed(4)}  (assumed ${e.openaiFrames} flagged frame(s))`,
+    `  OpenAI ${openaiModel}  $${RATES.openaiInputPerM}/M in + $${RATES.openaiOutputPerM}/M out`,
+    `    Context scan  : ≈ ${toInr(e.scanUsd)}  (${e.scanBatches} batch call(s), text only)`,
+    `    Screen frames : ≈ ${toInr(e.visionUsd)}  (assumed ${e.openaiFrames} frame(s))`,
     '─────────────────────────────────────────────────',
     `  ESTIMATED TOTAL : ~${e.displayCents}  (≈ ${formatInr(e.totalInr)})`,
-    '  Resume logic skips already-completed sessions,',
+    '  Resume logic skips already-completed recordings,',
     '  so actual spend is usually LOWER than this.',
   ];
   const width = Math.max(...content.map((l) => l.length)) + 2;

@@ -23,13 +23,13 @@ const logger = require('./logger');
  *     <originalBaseName>__part02.mp3
  *     ...
  *
- *   Deliberately NOT flat in audio/ — pure-english.js and index.js's
- *   --transcribe-only resume both do a flat directory scan for *.mp3 in
+ *   Deliberately NOT flat in audio/ — index.js's
+ *   --transcribe-only resume does a flat directory scan for *.mp3 in
  *   audio/. Keeping chunk files in a subfolder means those scans never see
  *   them as independent items by accident (which would otherwise try to
  *   session-resolve "MyRecording__part02" as its own unrelated recording).
  *   Callers that DO need to see chunks (transcribe.js, index.js's
- *   --transcribe-only resume, pure-english.js's listing step) go through
+ *   --transcribe-only resume, merge-chunks.js) go through
  *   the explicit helpers below instead of a raw directory scan.
  *
  * SESSION IDENTITY:
@@ -46,7 +46,7 @@ const logger = require('./logger');
  *   timestamped or not.
  *
  * WHAT THIS FILE DOES NOT DO:
- *   It never calls Sarvam, DeepSeek, or OpenAI. It never merges transcripts
+ *   It never calls Sarvam or OpenAI. It never merges transcripts
  *   (see src/merge-chunks.js for that). It only probes duration and splits
  *   audio — pure local ffmpeg/ffprobe work.
  */

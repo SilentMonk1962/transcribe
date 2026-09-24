@@ -2,16 +2,16 @@
 
 /**
  * credit-errors.js — shared credit/quota exhaustion detection for every
- * pipeline stage that calls a paid API (Sarvam, DeepSeek, OpenAI).
+ * pipeline stage that calls a paid API (Sarvam, OpenAI).
  *
  * Each stage used to maintain its own copy of isCreditError()/printCreditExhausted()
  * with slightly different keyword sets. This module is the single source of
- * truth: the keyword union below covers Sarvam, DeepSeek, and OpenAI error
+ * truth: the keyword union below covers Sarvam and OpenAI error
  * shapes, so every stage classifies and reports billing failures the same way.
  */
 
 // Anchored patterns (word-boundary regexes, NOT bare substrings) covering the
-// billing/credit failure shapes of Sarvam, DeepSeek, and OpenAI. The previous
+// billing/credit failure shapes of Sarvam and OpenAI. The previous
 // keyword lists matched bare strings like "credit", "quota", or "balance"
 // anywhere in a message — a mundane error that merely CONTAINED one of those
 // words (e.g. "credit-card fields skipped") would misclassify as a credit
@@ -68,7 +68,7 @@ function toCreditErrorOrNull(err) {
  * state) without forking the whole function.
  *
  * @param {object} opts
- * @param {string} opts.serviceLabel - e.g. "Sarvam", "DeepSeek", "OpenAI"
+ * @param {string} opts.serviceLabel - e.g. "Sarvam", "OpenAI"
  * @param {string} opts.topUpUrl     - billing page for the provider
  * @param {string} opts.resumeCmd    - npm script to re-run to resume
  * @param {string} opts.currentItem  - what was being processed when it failed
