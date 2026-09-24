@@ -17,7 +17,6 @@ Turns a Teams meeting recording into **one English transcript with on-screen con
 ```
 npm run pipeline                               # checks status, asks for budget consent, runs
 npm run pipeline -- --yes                      # no budget prompt (automation)
-npm run pipeline -- --allow-missing-video      # finish video-less recordings without asking
 ```
 
 ## 3. What happens
@@ -25,7 +24,7 @@ npm run pipeline -- --allow-missing-video      # finish video-less recordings wi
 | Step | Engine | What it does |
 |---|---|---|
 | Status | local | Sorts each recording: **done** (₹0), **transcribed** (OpenAI only), **new** (Sarvam + OpenAI) |
-| Missing videos | you | Lists transcribed recordings whose video is gone. **y** = finish without screen context, **N** = hold until you put the video back |
+| Missing videos | local | Transcribed recordings whose video is gone are finished without screen context (₹0) — one summary line, no prompt |
 | Budget | local | Estimates **pending work only**. No prompt when the total is ₹0 |
 | 1. convert | ffmpeg | Video → audio. Recordings over 60 min are split into chunks. Finished recordings are skipped |
 | 2. transcribe | Sarvam | Audio → English transcript with speakers. Chunked recordings are merged back into one timeline |
@@ -49,7 +48,7 @@ SCREEN  : 1 note(s) added (2 frame(s) requested, 1 not visible)
 The `SCREEN` line in the header always states the outcome:
 - `N note(s) added (…)`: context was added.
 - `none needed`: no line pointed at the screen.
-- `unavailable — source video not found in input/`: you chose to finish without the video.
+- `unavailable — source video not found in input/`: the video was gone, so no screen context.
 
 ## 5. Edge cases
 

@@ -19,15 +19,13 @@ const logger = require('./lib/logger');
  *     This button looks off here.
  *     [SCREEN @ 12:07] The 'Submit' CTA on the KYC page is grey instead of blue.
  *
- * SOURCE VIDEO MISSING: the recording is HELD (nothing spent, nothing
- * deleted) unless run with { allowMissingVideo: true } — pipeline.js asks
- * you first. When allowed, the transcript is written without screen context
- * and its header says so.
+ * SOURCE VIDEO MISSING: the transcript is written without screen context
+ * (no OpenAI call, ₹0) and its header says so.
  *
  * A frame that fails to capture/describe is retried next run, up to
  * MAX_ATTEMPTS, then skipped and counted in the header.
  *
- * Usage: node src/context.js [--allow-missing-video]
+ * Usage: node src/context.js
  */
 
 require('dotenv').config();
@@ -133,8 +131,8 @@ function finalize(rec, result, annotations, screenStatus) {
 
 /**
  * @param {{group: string, sessionId: string, baseName: string, jsonPath: string}} rec
- * @param {{allowMissingVideo: boolean, getClient: () => OpenAI}} opts
- * @returns {Promise<'written'|'held'|'failed'|'skipped'>}
+ * @param {{getClient: () => OpenAI}} opts
+ * @returns {Promise<'written'|'failed'|'skipped'>}
  */
 async function processRecording(rec, opts) {
   const { group, sessionId, baseName, jsonPath } = rec;
@@ -156,10 +154,6 @@ async function processRecording(rec, opts) {
   // 1. Source video
   const video = findSourceVideo(config.inputDir(), baseName, group, DEFAULT_GROUP);
   if (!video) {
-    if (!opts.allowMissingVideo) {
-      logger.warn(`  [context] ⏸ Held (source video not in input/): ${label}`);
-      return 'held';
-    }
     finalize(rec, result, new Map(), 'unavailable — source video not found in input/');
     return 'written';
   }
@@ -252,11 +246,10 @@ async function processRecording(rec, opts) {
 // ─── Stage entry point ────────────────────────────────────────────────────────
 
 /**
- * @param {{allowMissingVideo?: boolean}} [opts]
- * @returns {Promise<{written: number, held: number, failed: number, skipped: number}>}
+ * @returns {Promise<{written: number, failed: number, skipped: number}>}
  */
-async function run(opts = {}) {
-  const tally = { written: 0, held: 0, failed: 0, skipped: 0 };
+async function run() {
+  const tally = { written: 0, failed: 0, skipped: 0 };
   let client = null;
   const getClient = () => {
     if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is not set in .env');
@@ -265,7 +258,7 @@ async function run(opts = {}) {
 
   for (const rec of listTranslatedRecordings()) {
     try {
-      tally[await processRecording(rec, { allowMissingVideo: !!opts.allowMissingVideo, getClient })]++;
+      tally[await processRecording(rec, { getClient })]++;
     } catch (err) {
       if (!err.isCreditError) throw err;
       exitCreditExhausted({
@@ -277,7 +270,6 @@ async function run(opts = {}) {
   }
 
   logger.info(`[context] ${tally.written} written` +
-    (tally.held ? `, ${tally.held} held (source video missing)` : '') +
     (tally.failed ? `, ${tally.failed} incomplete (retried next run)` : '') + '.');
   return tally;
 }
@@ -285,7 +277,7 @@ async function run(opts = {}) {
 module.exports = { run, processRecording, cleanupRecording, isSettled };
 
 if (require.main === module) {
-  run({ allowMissingVideo: process.argv.includes('--allow-missing-video') }).catch((err) => {
+  run().catch((err) => {
     logger.error('\n[fatal error]', err.message || err);
     process.exit(1);
   });
