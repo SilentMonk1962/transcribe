@@ -1,0 +1,39 @@
+{
+  "name": "transcribe-audio-recordings",
+  "version": "1.0.0",
+  "description": "Converts bilingual meeting video recordings to audio and transcribes them using Sarvam AI Batch API (English translate by default, optional Hinglish codemix, with speaker diarization), then drafts/verifies meeting notes via DeepSeek with a pre-run budget consent.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "convert-only": "node src/index.js --convert-only",
+    "transcribe-only": "node src/index.js --transcribe-only",
+    "merge-chunks": "node src/merge-chunks.js",
+    "pure-english": "node src/pure-english.js",
+    "meeting-notes": "node src/meeting-notes.js",
+    "verify-notes": "node src/verify-notes.js",
+    "vision-capture": "node src/vision-capture.js",
+    "vision-caption": "node src/vision-caption.js",
+    "vision-patch": "node src/vision-patch.js",
+    "xlsx": "node src/generate-xlsx.js",
+    "md": "node src/generate-md.js",
+    "pipeline": "node src/pipeline.js",
+    "pipeline-stop-at-transcript": "node src/pipeline.js --until transcript",
+    "merge-open-points": "node merge-open-points.js",
+    "stt-eval": "node stt-eval/run-eval.js",
+    "stt-find-windows": "node stt-eval/find-windows.js",
+    "stt-slice-ref": "node stt-eval/slice-ref.js"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffprobe-installer/ffprobe": "^2.1.2",
+    "dotenv": "^16.4.5",
+    "fluent-ffmpeg": "^2.1.3",
+    "openai": "^6.43.0",
+    "sarvamai": "^1.0.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

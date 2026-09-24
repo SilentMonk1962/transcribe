@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Meeting Notes Pipeline — How It Works &amp; How To Use It</title>
+<style>
+  body { font-family: Calibri, Arial, sans-serif; font-size: 11pt; line-height: 1.45; color: #1a1a1a; max-width: 46em; }
+  h1 { font-size: 20pt; color: #0b3d6f; margin-bottom: 2px; }
+  h2 { font-size: 14pt; color: #0b3d6f; border-bottom: 1px solid #c9d4e0; padding-bottom: 3px; margin-top: 1.4em; }
+  h3 { font-size: 12pt; color: #14518c; margin-bottom: 4px; }
+  code { font-family: Consolas, "Courier New", monospace; background: #f2f4f7; padding: 0 3px; font-size: 10pt; }
+  pre { font-family: Consolas, "Courier New", monospace; background: #f2f4f7; padding: 8px 10px; font-size: 10pt; white-space: pre-wrap; }
+  ul, ol { margin-top: 4px; }
+  li { margin-bottom: 3px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 6px; }
+  th, td { border: 1px solid #b7c2cf; padding: 5px 7px; text-align: left; vertical-align: top; font-size: 10.5pt; }
+  th { background: #e3ecf5; color: #0b3d6f; }
+  .note { background: #fff7e0; border-left: 4px solid #e0a800; padding: 6px 10px; margin: 8px 0; }
+  .tip { background: #e7f3e7; border-left: 4px solid #2e7d32; padding: 6px 10px; margin: 8px 0; }
+  .warn { background: #fdecea; border-left: 4px solid #c62828; padding: 6px 10px; margin: 8px 0; }
+  .sub { color: #555; font-size: 10pt; margin-top: 0; }
+</style>
+</head>
+<body>
+
+<h1>Meeting Notes Pipeline — How It Works &amp; How To Use It</h1>
+<p class="sub">A plain-English guide for product managers. Covers: what the service does, the Teams-to-notes workflow, what you get back, and all the edge cases it already handles for you.</p>
+
+<h2>1. What this is</h2>
+<p>This is a command-line tool that turns a <strong>Teams meeting recording</strong> into a set of <strong>clean, structured meeting notes</strong>:</p>
+<ul>
+  <li>Video recording &rarr; audio</li>
+  <li>Audio &rarr; full transcript (with speaker diarization — it knows roughly who said what)</li>
+  <li>Transcript &rarr; clean English text</li>
+  <li>Transcript &rarr; <strong>draft meeting notes</strong>: topics covered, problems faced, feature requests, and an action list</li>
+  <li>Notes &rarr; <strong>one Excel workbook</strong> containing every session's problems, topics, action items, and gaps — nothing raised in a call is dropped</li>
+</ul>
+<p>It also has an optional <strong>vision-assist</strong> step: when a meeting discussed something on-screen (a UI, a dashboard, a config screen), it can capture the exact moment on screen and weave a short visual confirmation into the notes.</p>
+
+<div class="note"><strong>Intended for:</strong> everyone who regularly records customer/product calls (especially bilingual ones) and needs accurate, organized notes afterward — without listening to hours of audio.</div>
+
+<h2>2. What you need before you start</h2>
+<ol>
+  <li><strong>Node.js</strong> installed (version 18 or newer). Check with <code>node -v</code> in a terminal.</li>
+  <li><strong>Dependencies installed.</strong> Open a terminal in the project folder (<code>transcribe-audio-recordings/</code>) and run <code>npm install</code> once.</li>
+  <li><strong>API keys in a file called <code>.env</code>.</strong> Copy <code>.env.example</code> to <code>.env</code> and paste in three keys:
+    <ul>
+      <li><code>SARVAM_API_KEYS</code> — Sarvam AI key(s) for transcription. Get one at dashboard.sarvam.ai. You can list several comma-separated; if one runs out of credits mid-run, the tool automatically switches to the next.</li>
+      <li><code>DEEPSEEK_API_KEY</code> — DeepSeek key for writing the notes. Get one at platform.deepseek.com.</li>
+      <li><code>OPENAI_API_KEY</code> — OpenAI key for the on-screen visual checks. Get one at platform.openai.com.</li>
+    </ul>
+  </li>
+  <li><strong>An input folder</strong> called <code>input/</code> inside the project folder — this is where you drop recordings.</li>
+</ol>
+
+<div class="note"><strong>Where does each recording go?</strong> The tool groups recordings by name (see <code>groups.config.json</code>). If a new recurring meeting starts, add one line there — for example a rule saying "files with 'AECB Scenario review' in the name belong to the <em>aecb-scenario-review</em> group". Files that match nothing are put in <code>ungrouped</code> and flagged in the console so you notice and can add a rule.</div>
+
+<h2>3. The Teams &rarr; notes recipe (step by step)</h2>
+<h3>3.1 Download the recording from Teams</h3>
+<ol>
+  <li>Open the meeting in the <strong>Teams app</strong> and go to the meeting's <strong>Chat</strong> tab (the conversation tied to that meeting).</li>
+  <li>Scroll up to the <strong>Recording</strong> entry — Teams posts a recording card there automatically after the call.</li>
+  <li>Click the <strong>Download</strong> icon on the recording card. Teams saves a <strong>video file</strong> (usually <code>.mp4</code>, sometimes <code>.mov</code>).</li>
+  <li>(Optional but handy) If a transcript was enabled, you can also grab the transcript — but you don't need to; the pipeline generates its own transcript.</li>
+</ol>
+
+<div class="tip"><strong>Tip:</strong> The recording filename automatically contains the date + time the call started (for example <code>...-20260724_121411-Meeting Recording.mp4</code>). Keep that part of the name — it's how the tool knows the session date and how it tells two meetings apart.</div>
+
+<h3>3.2 Save the file into the input folder</h3>
+<ol>
+  <li>Find the project folder: <code>Application Journey Revamp/transcribe-audio-recordings/</code>.</li>
+  <li>Move/copy the downloaded video into the <code>input/</code> subfolder inside it.</li>
+  <li>You can drop in <strong>several recordings at once</strong> — the pipeline processes them all in one run.</li>
+</ol>
+
+<h3>3.3 Run the pipeline</h3>
+<ol>
+  <li>Open a <strong>terminal</strong> and go to the project folder:
+    <pre>cd "Application Journey Revamp/transcribe-audio-recordings"</pre>
+  </li>
+  <li>Run the whole thing:
+    <pre>npm run pipeline</pre>
+  </li>
+  <li>Wait. It streams progress to the screen. Depending on length and the number of files, this takes from a few minutes to an hour or two.</li>
+</ol>
+
+<div class="warn"><strong>Important:</strong> run long steps like <code>npm run pipeline</code> from <strong>your own terminal</strong> window, not through a chat assistant's tool that can be interrupted. Interruptions mid-run are safe (you can just re-run — finished parts are skipped) but a fully completed run is the smoothest experience.</div>
+
+<h2>4. What you get back</h2>
+<p>Everything is written under <code>output/</code>, organized as <code>output/&lt;group&gt;/&lt;session-date&gt;/</code>.</p>
+
+<h3>The two things you'll actually open</h3>
+<table>
+  <tr><th>File</th><th>What it is</th></tr>
+  <tr><td><code>output/meeting-notes.xlsx</code></td><td>The main deliverable. One Excel workbook covering <strong>all groups and sessions</strong>, with five sheets:</td></tr>
+  <tr><td>&nbsp;&nbsp;&#8226; Problems</td><td>Every problem raised, with who raised it (<em>Raised By</em>), status, and any visual confirmation.</td></tr>
+  <tr><td>&nbsp;&nbsp;&#8226; Topics</td><td>Every topic/concept covered, with key parameters and examples.</td></tr>
+  <tr><td>&nbsp;&nbsp;&#8226; Summary</td><td>One row per session: how many topics, problems, feature requests, open items, and flagged items.</td></tr>
+  <tr><td>&nbsp;&nbsp;&#8226; Action Items</td><td>Every problem that has a feature request — i.e. the things that actually need to be done.</td></tr>
+  <tr><td>&nbsp;&nbsp;&#8226; Gaps &amp; Risks</td><td>Points the verification step flagged for a human to double-check (possible hallucinations or omissions).</td></tr>
+  <tr><td><code>output/&lt;group&gt;/&lt;session&gt;/notes/final.md</code></td><td>The polished, per-session write-up — the version you read top-to-bottom for one meeting.</td></tr>
+</table>
+
+<div class="tip"><strong>About the "Raised By" column:</strong> the tool labels speakers as <strong>"Speaker 1"</strong>, <strong>"Speaker 2"</strong>, etc., because it can tell speakers apart but not their real names. Before sharing the workbook, replace those labels with real names (this is a quick find-and-replace in Excel).</div>
+
+<h2>5. Running one step at a time</h2>
+<p>You don't have to run the whole pipeline. Each step has its own command, so you can re-run just the piece you need. All of them resume safely — if a step is already done, re-running skips it.</p>
+<table>
+  <tr><th>Command</th><th>What it does</th></tr>
+  <tr><td><code>npm run convert-only</code></td><td>Video &rarr; audio. Long recordings are automatically cut into ~60-minute chunks here.</td></tr>
+  <tr><td><code>npm run transcribe-only</code></td><td>Audio &rarr; transcript (Sarvam AI).</td></tr>
+  <tr><td><code>npm run merge-chunks</code></td><td>Stitches chunked recordings' transcripts back into one continuous transcript. (No-op for short recordings.)</td></tr>
+  <tr><td><code>npm run pure-english</code></td><td>Transcript &rarr; clean English text.</td></tr>
+  <tr><td><code>npm run meeting-notes</code></td><td>English text &rarr; draft notes (topics, problems, feature requests) + the structured data used for Excel.</td></tr>
+  <tr><td><code>npm run verify-notes</code></td><td>Independent cross-check of the draft against the full transcript, flagging possible hallucinations/omissions.</td></tr>
+  <tr><td><code>npm run vision-capture</code></td><td>Captures the exact on-screen frames that the notes flagged.</td></tr>
+  <tr><td><code>npm run vision-caption</code></td><td>Captions those frames (OpenAI).</td></tr>
+  <tr><td><code>npm run vision-patch</code></td><td>Weaves the captions into <code>final.md</code> as visual confirmations.</td></tr>
+  <tr><td><code>npm run xlsx</code></td><td>Rebuilds the Excel workbook from existing notes.</td></tr>
+  <tr><td><code>npm run md</code></td><td>Same as Excel, but as a markdown/plain-text rollup instead.</td></tr>
+</table>
+
+<h2>6. Features &amp; edge cases it already handles</h2>
+<ul>
+  <li><strong>Never mixes unrelated calls.</strong> Recordings are grouped by name; each group stays separate in the output.</li>
+  <li><strong>Two meetings on the same day?</strong> The tool asks you once, in the terminal: <em>"same session or separate?"</em> Answer <code>S</code> (same) or <code>P</code> (separate). It remembers your answer for next time.</li>
+  <li><strong>Long recordings.</strong> Anything over ~60 minutes is automatically split into chunks before transcription, then stitched back into one continuous transcript with corrected timestamps.</li>
+  <li><strong>Credits running out mid-run.</strong> If a Sarvam key runs out of credits, the tool automatically switches to the next key in <code>SARVAM_API_KEYS</code> and keeps going, printing which key it switched to. If <em>all</em> keys are exhausted, it stops cleanly with a "top up and re-run" message — nothing already done is lost.</li>
+  <li><strong>Resume-friendly.</strong> Any interruption (power loss, laptop close, credit stop) — just re-run and it picks up where it left off.</li>
+  <li><strong>Hallucination guardrails.</strong> The notes step reads the whole transcript once to build a topic index, then drafts notes aware of it (so a topic mentioned early and again late isn't duplicated or lost). A separate verification step independently re-checks the draft against the transcript and flags anything that looks invented or missing — flagged items go to the <em>Gaps &amp; Risks</em> sheet for a human to review, never silently into the notes.</li>
+  <li><strong>Smart screenshots.</strong> It captures only the exact moments the notes flagged as needing a visual check — not every 90 seconds. If the source video was deleted after conversion, it notes that plainly and continues.</li>
+  <li><strong>Excel guarantees completeness.</strong> The workbook is built directly from structured data, not a summarized text rollup — so every problem and every feature request survives as its own row.</li>
+</ul>
+
+<h2>7. Gotchas &amp; FAQ</h2>
+<ul>
+  <li><strong>Run from your own terminal.</strong> The paid, long-running steps shouldn't be kicked off from a chat assistant's sandbox (a killed process can't be resumed mid-flight for the transcription service).</li>
+  <li><strong>"Speaker N" is a placeholder.</strong> The tool can't know real names; swap them in before sharing.</li>
+  <li><strong>Don't delete <code>final.md</code> casually.</strong> Deleting it forces the vision step to redo it. If you just want fresher notes, delete <code>notes/draft.md</code>, <code>notes/final.md</code>, and <code>notes/session-data.json</code> together and re-run <code>meeting-notes</code> onward — or simply re-run the whole pipeline.</li>
+  <li><strong>Files left over from an older version.</strong> Older runs produced <code>output/&lt;group&gt;/master-meeting-notes.md</code> files. Those are now superseded by the Excel workbook; you can delete them if you like — nothing generates them anymore.</li>
+  <li><strong>"Ungrouped" recordings.</strong> If a recording's name doesn't match any group rule, it lands in <code>ungrouped</code> and the console tells you. Add a rule in <code>groups.config.json</code> to give it a proper home.</li>
+  <li><strong>Where are the API keys?</strong> In <code>.env</code>, which is private (never commit it). Copy <code>.env.example</code> to <code>.env</code> when setting up a new machine.</li>
+  <li><strong>Anything deleted from <code>input/</code>?</strong> Source videos get cleaned up over time; if a video is gone when a vision check runs, the notes say so instead of failing the whole run.</li>
+</ul>
+
+</body>
+</html>
