@@ -2,23 +2,14 @@
   "name": "transcribe-audio-recordings",
   "version": "1.0.0",
   "description": "Converts bilingual meeting recordings to audio, transcribes them to English with Sarvam AI (speaker diarization), then uses OpenAI to inject on-screen context from the video into the transcript, with a pre-run budget consent.",
-  "main": "src/index.js",
+  "main": "src/pipeline.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node src/index.js",
-    "convert-only": "node src/index.js --convert-only",
-    "transcribe-only": "node src/index.js --transcribe-only",
-    "merge-chunks": "node src/merge-chunks.js",
-    "context-scan": "node src/context-scan.js",
-    "frame-capture": "node src/frame-capture.js",
-    "frame-describe": "node src/frame-describe.js",
-    "context-inject": "node src/context-inject.js",
+    "start": "node src/pipeline.js",
     "pipeline": "node src/pipeline.js",
-    "cleanup-legacy": "node src/cleanup-legacy.js",
-    "merge-open-points": "node merge-open-points.js",
-    "stt-eval": "node stt-eval/run-eval.js",
-    "stt-find-windows": "node stt-eval/find-windows.js",
-    "stt-slice-ref": "node stt-eval/slice-ref.js"
+    "convert": "node src/convert.js",
+    "transcribe": "node src/transcribe.js",
+    "context": "node src/context.js"
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",

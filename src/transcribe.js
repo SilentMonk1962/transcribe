@@ -2,288 +2,221 @@
 const logger = require('./lib/logger');
 
 /**
- * transcribe.js
- * Submits audio files to the Sarvam AI Batch Speech-to-Text API.
+ * transcribe.js — Stage 2: audio → English transcript JSON (Sarvam, translate
+ * mode, speaker diarization).
  *
- * RESILIENCE LAYERS:
- *   Layer 1 — Resume:       Each file's output is named after the source audio file.
- *                            On re-run, already-completed files are skipped automatically.
- *   Layer 2 — Per-file jobs: 1 file = 1 Sarvam job. If credits die mid-way, only the
- *                            current file fails. All previous files are already saved.
- *   Layer 3 — Key rotation:  All Sarvam keys come from ONE pool (lib/sarvam-keys.js —
- *                            SARVAM_API_KEYS comma list, or legacy SARVAM_API_KEY +
- *                            SARVAM_API_KEY_FALLBACK). On credit exhaustion the pool
- *                            rotates to the next key and the SAME file retries
- *                            automatically. When every key is exhausted it prints a
- *                            clean, human-readable message and exits (code 2).
+ * Per audio file (flat audio/*.mp3 and chunk parts under audio/_chunks/):
+ *   - skipped if the recording's final contextual transcript exists, or its
+ *     transcript JSON is already on disk (resume — nothing is billed twice)
+ *   - otherwise one Sarvam job, output to
+ *     output/<group>/<session>/transcripts/translate/<name>.json
  *
- * Runs exactly ONE pass per file: mode = "translate" (full English
- * translation). The Hinglish "codemix" pass was removed — it only bloated each
- * session folder with a near-duplicate transcript.
+ * Then, for each chunked recording whose parts are ALL transcribed, the
+ * parts are merged into one <name>.json with timestamps shifted onto one
+ * continuous timeline. Note: speaker numbers are not reconciled across
+ * chunks (each part is diarized on its own).
  *
- * Output per file: raw Sarvam JSON only (transcripts/translate/<name>.json).
- * It is an INTERMEDIATE — the human-readable deliverable is written later by
- * context-inject.js as <name>-contextual.txt, after which this JSON is deleted.
- * A recording whose contextual transcript already exists is never re-billed.
+ * Credits: keys rotate on exhaustion; when all are spent the run exits with
+ * code 2 (lib/credit.js). A non-credit failure skips only that file.
+ *
+ * Usage: node src/transcribe.js
  */
+
+require('dotenv').config();
 
 const fs = require('fs');
 const path = require('path');
-const { config } = require('./lib/config');
-const {
-  resolveSession,
-  transcriptsModeDir,
-  contextualTranscriptPath,
-  ensureDir,
-} = require('./lib/session-paths');
-const { findManifestForChunkFile } = require('./lib/chunking');
+const { config, ensureDir } = require('./lib/config');
+const { resolveSession, translateDir, contextualTranscriptPath } = require('./lib/sessions');
+const { listAllChunkManifests, chunkAudioPaths } = require('./lib/chunking');
 const { SarvamKeyPool } = require('./lib/sarvam-keys');
-const { isCreditError } = require('./lib/credit-errors');
-const { withSarvamKeyRetry } = require('./lib/credit-runner');
-
-// The only Sarvam pass the pipeline runs (codemix removed — see header).
-const MODE = 'translate';
+const { isCreditError, withSarvamKeyRetry } = require('./lib/credit');
 
 /**
- * Resolves the group/session-id for ONE audio file, chunk-aware.
- *
- * A chunk file (audio/_chunks/<baseName>/<baseName>__partNN.mp3) must NEVER
- * independently call resolveSession() on its own filename — that would
- * treat each chunk as its own unrelated recording (see chunking.js header
- * for why). Instead it reuses the session identity already resolved once,
- * by convert.js, for the ORIGINAL recording and stored in the manifest.
- * Non-chunked files fall through to the normal resolveSession() path,
- * unchanged.
+ * Builds the work list. Chunk parts carry their manifest's session; flat
+ * files resolve theirs (already persisted by convert.js).
  *
  * @param {string} audioDir
- * @param {string} audioPath
- * @returns {Promise<{group: string, sessionId: string, effectiveSessionId: string, hasTimestamp: boolean, isChunk: boolean, recordingBaseName: string, chunkEntry?: object}>}
+ * @returns {Promise<Array<{audioPath: string, baseName: string, recording: string, session: object}>>}
  */
-async function resolveSessionForAudioFile(audioDir, audioPath) {
-  const chunkInfo = findManifestForChunkFile(audioDir, audioPath);
-  if (chunkInfo) {
-    const { manifest, chunkEntry } = chunkInfo;
-    return {
-      group: manifest.group,
-      sessionId: manifest.sessionId,
-      effectiveSessionId: manifest.effectiveSessionId,
-      hasTimestamp: true,
-      isChunk: true,
-      // The ORIGINAL recording's name — the final contextual transcript is
-      // keyed by it, never by the chunk's suffixed name.
-      recordingBaseName: manifest.originalBaseName,
-      chunkEntry,
-    };
+async function listAudioItems(audioDir) {
+  const items = [];
+  if (!fs.existsSync(audioDir)) return items;
+
+  for (const f of fs.readdirSync(audioDir).filter((n) => n.toLowerCase().endsWith('.mp3')).sort()) {
+    const baseName = path.basename(f, path.extname(f));
+    items.push({ audioPath: path.join(audioDir, f), baseName, recording: baseName, session: await resolveSession(baseName) });
   }
-  const baseName = path.basename(audioPath, path.extname(audioPath));
-  const session = await resolveSession(baseName);
-  return { ...session, isChunk: false, recordingBaseName: baseName };
+  for (const m of listAllChunkManifests(audioDir)) {
+    const session = { group: m.group, sessionId: m.sessionId, effectiveSessionId: m.effectiveSessionId };
+    for (const audioPath of chunkAudioPaths(m, audioDir)) {
+      items.push({ audioPath, baseName: path.basename(audioPath, '.mp3'), recording: m.originalBaseName, session });
+    }
+  }
+  return items;
 }
 
-// ─── Core: single-file, single-mode job ───────────────────────────────────────
-
 /**
- * Processes ONE audio file in translate mode.
+ * Runs one Sarvam job for one audio file and saves its JSON.
+ * Throws an `.isCreditError` error on billing failure (caller rotates keys).
  *
- * Layer 1 — Resume: skips if the output JSON already exists, OR if the
- *            recording's final contextual transcript exists (the JSON is
- *            deleted after the final is written — see context-inject.js).
- * Layer 2 — Per-file: creates a fresh Sarvam job for just this one file.
- * Layer 3 — Credit errors: caught and re-thrown with isCreditError flag set
- *            (the caller, transcribeAll, handles rotation + clean exit).
- *
- * @param {import('sarvamai').SarvamAIClient} client - Initialised SDK client
- * @param {string}   audioPath    - Absolute path to the MP3 file
- * @param {string}   jobOutputDir - Resolved per-session transcripts/translate/ directory
- * @param {string}   finalPath    - This recording's <name>-contextual.txt path
- * @param {number}   numSpeakers  - Max expected speakers
- * @param {string}   progress     - Display string e.g. "[1/4]"
- * @returns {Promise<'done'|'skipped'|'failed'>}
+ * @returns {Promise<'done'|'failed'>}
  */
-async function processOneFile(client, audioPath, jobOutputDir, finalPath, numSpeakers, progress) {
-  const modeLabel = 'Translate';
-  const baseName = path.basename(audioPath, path.extname(audioPath));
-
-  // ── LAYER 1: Resume check ──────────────────────────────────────────────────
-  // Final deliverable already written → intermediates were cleaned up on
-  // purpose; never re-bill Sarvam for this recording.
-  if (fs.existsSync(finalPath)) {
-    logger.info(`  ${progress} [${modeLabel}] ⏭  Skipping (contextual transcript exists): ${baseName}`);
-    return 'skipped';
-  }
-
-  ensureDir(jobOutputDir);
-
-  // Output JSON is named after the source audio file — if it exists, we're done.
-  const finalJsonPath = path.join(jobOutputDir, `${baseName}.json`);
-  if (fs.existsSync(finalJsonPath)) {
-    logger.info(`  ${progress} [${modeLabel}] ⏭  Skipping (already done): ${baseName}`);
-    return 'skipped';
-  }
-
-  logger.info(`  ${progress} [${modeLabel}] Submitting: ${baseName}`);
-
+async function transcribeOne(client, audioPath, outJson, label) {
   try {
-    // ── LAYER 2: One file per job ──────────────────────────────────────────
     const job = await client.speechToTextJob.createJob({
       model: config.sarvamModel(),
-      mode: MODE,
+      mode: 'translate',
       withDiarization: true,
-      numSpeakers: numSpeakers,
+      numSpeakers: config.numSpeakers(),
     });
-
-    await job.uploadFiles([audioPath]); // only this one file — SDK takes a plain array
+    await job.uploadFiles([audioPath]);
     await job.start();
-
-    logger.info(`  ${progress} [${modeLabel}] Processing... (may take several minutes)`);
+    logger.info(`  [transcribe] Processing ${label} (may take several minutes)…`);
     await job.waitUntilComplete();
 
-    // Check if Sarvam reports a file-level failure
-    const fileResults = await job.getFileResults();
-
-    if (fileResults.failed && fileResults.failed.length > 0) {
-      const errMsg = fileResults.failed[0].error_message || 'Unknown error';
-
-      // ── LAYER 3: Credit error at job-result level ──────────────────────
-      if (isCreditError(errMsg)) {
-        const err = new Error(errMsg);
-        err.isCreditError = true;
-        throw err;
-      }
-
-      logger.error(`  ${progress} [${modeLabel}] ✗ Sarvam rejected file: ${errMsg}`);
-      return 'failed'; // failed but not a credit error — reported, retried on next run
+    const results = await job.getFileResults();
+    if (results.failed?.length > 0) {
+      const msg = results.failed[0].error_message || 'Unknown error';
+      if (isCreditError(msg)) throw Object.assign(new Error(msg), { isCreditError: true });
+      logger.error(`  [transcribe] ✗ Sarvam rejected ${label}: ${msg}`);
+      return 'failed';
     }
 
-    // Download into a temp folder — SDK names the file after the source audio
-    const tempDir = path.join(jobOutputDir, `_tmp_${baseName}`);
-    fs.mkdirSync(tempDir, { recursive: true });
-
+    // The SDK names the downloaded file itself — download to a temp dir, take the JSON.
+    const tmp = `${outJson}.tmpdir`;
+    ensureDir(tmp);
     try {
-      await job.downloadOutputs(tempDir);
-    } catch (err) {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-      throw err;
+      await job.downloadOutputs(tmp);
+      const json = fs.readdirSync(tmp).find((f) => f.endsWith('.json'));
+      if (!json) throw new Error('Sarvam returned no JSON output');
+      JSON.parse(fs.readFileSync(path.join(tmp, json), 'utf8')); // corrupt output must not look "done"
+      fs.renameSync(path.join(tmp, json), outJson);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
     }
-
-    // Find whatever .json the SDK dropped (name varies by SDK version)
-    const downloadedFiles = fs.readdirSync(tempDir).filter((f) => f.endsWith('.json'));
-    if (downloadedFiles.length > 0) {
-      fs.renameSync(path.join(tempDir, downloadedFiles[0]), finalJsonPath);
-    }
-
-    // Clean up temp dir — rmSync handles non-empty dirs (rmdirSync does not)
-    fs.rmSync(tempDir, { recursive: true, force: true });
-
-    // Validate the JSON now — a corrupt file must not look "done" to resume.
-    try {
-      JSON.parse(fs.readFileSync(finalJsonPath, 'utf8'));
-    } catch (err) {
-      logger.error(`  ${progress} [${modeLabel}] ✗ Could not read/parse Sarvam output for ${baseName}: ${err.message}`);
-      fs.rmSync(finalJsonPath, { force: true });
-      return 'failed'; // re-run will fetch it again
-    }
-
-    logger.info(`  ${progress} [${modeLabel}] ✓ Done → ${baseName}.json`);
+    logger.info(`  [transcribe] ✓ ${label}`);
     return 'done';
-
   } catch (err) {
-    // ── LAYER 3: Credit error at API/exception level ───────────────────────
     if (err.isCreditError || isCreditError(err.message) || isCreditError(String(err.status))) {
-      err.isCreditError = true; // ensure flag is set before re-throw
+      err.isCreditError = true;
       throw err;
     }
-
-    // Any other error: log cleanly and report as failed (not "done") — the
-    // run summary distinguishes these, and resume re-attempts them next run.
-    logger.error(`  ${progress} [${modeLabel}] ✗ Error processing ${baseName}: ${err.message}`);
+    logger.error(`  [transcribe] ✗ ${label}: ${err.message}`);
     return 'failed';
   }
 }
 
-// ─── Main entry point ─────────────────────────────────────────────────────────
+// ─── Chunk merge ──────────────────────────────────────────────────────────────
 
-/**
- * Transcribes all audio files in translate (English) mode.
- * Processes one file at a time. On credit exhaustion the shared SarvamKeyPool
- * rotates to the next key and the SAME file retries automatically; when every
- * key is exhausted it prints the clean resume guide and exits with code 2
- * (pipeline.js treats 2 as "stopped intentionally").
- *
- * @param {string[]} audioPaths - Array of absolute MP3 paths (may include
- *                                chunk files under audio/_chunks/, see
- *                                src/lib/chunking.js)
- * @param {object}   options
- * @param {number}   [options.numSpeakers] - Max speakers per recording (default 8)
- * @param {string}   options.audioDir      - AUDIO_DIR, needed to detect chunk files
- *
- * NOTE ON PATHS: output directory is no longer a single global folder. Each
- * audio file resolves its own output/<group>/<session-id>/transcripts/translate/
- * folder via resolveSessionForAudioFile() above — chunk files reuse their
- * original recording's already-resolved session instead of re-resolving
- * from their own (suffixed) filename.
- */
-async function transcribeAll(audioPaths, options = {}) {
-  const { numSpeakers = 8, audioDir } = options;
-
-  const pool = new SarvamKeyPool();
-  if (pool.total === 0) {
-    throw new Error(
-      'No Sarvam API keys found. Set SARVAM_API_KEYS (comma-separated list) — or ' +
-      'the legacy SARVAM_API_KEY (+ optional SARVAM_API_KEY_FALLBACK) — in your .env file.'
-    );
+/** Shifts every timestamp in a chunk result by the chunk's start offset. */
+function offsetTimestamps(result, offset) {
+  const copy = JSON.parse(JSON.stringify(result));
+  for (const e of copy.diarized_transcript?.entries || []) {
+    if (e.start_time_seconds != null) e.start_time_seconds += offset;
+    if (e.end_time_seconds != null) e.end_time_seconds += offset;
   }
-  if (!audioPaths || audioPaths.length === 0) {
-    throw new Error('No audio files provided for transcription.');
+  if (copy.timestamps) {
+    copy.timestamps.start_time_seconds = (copy.timestamps.start_time_seconds || []).map((s) => s + offset);
+    copy.timestamps.end_time_seconds = (copy.timestamps.end_time_seconds || []).map((s) => s + offset);
   }
-
-  const total = audioPaths.length;
-
-  logger.info(`\n[sarvam] ${total} file(s) to process.`);
-  logger.info(`[sarvam] Mode: translate (English)`);
-  logger.info(`[sarvam] Speakers: up to ${numSpeakers}`);
-  logger.info(`[sarvam] Keys: ${pool.total} configured (rotates automatically on credit exhaustion)`);
-  logger.info(`[sarvam] Resume: already-completed files will be skipped.\n`);
-
-  // Each file is an independent job — a credit failure only stops the current file.
-  let doneCount = 0;
-  let failedCount = 0;
-
-  for (let i = 0; i < audioPaths.length; i++) {
-    const progress = `[${i + 1}/${total}]`;
-    const session = await resolveSessionForAudioFile(audioDir, audioPaths[i]);
-    const jobOutputDir = transcriptsModeDir(session.group, session.effectiveSessionId, MODE);
-    const finalPath = contextualTranscriptPath(
-      session.group, session.effectiveSessionId, session.recordingBaseName
-    );
-
-    // Retry/rotate logic lives in withSarvamKeyRetry (lib/credit-runner.js):
-    // on a credit error the SAME file retries on the next key, and when
-    // every key is spent it prints the resume box and exits with code 2.
-    const result = await withSarvamKeyRetry({
-      pool,
-      serviceLabel: 'Sarvam',
-      topUpUrl: 'https://dashboard.sarvam.ai/',
-      resumeCmd: 'npm run transcribe-only',
-      currentItem: path.basename(audioPaths[i]),
-      doneCount,
-      totalCount: total,
-      detailLines: [`Keys     : all ${pool.total} in the pool are exhausted.`],
-      attempt: (retryClient) =>
-        processOneFile(retryClient, audioPaths[i], jobOutputDir, finalPath, numSpeakers, progress),
-    });
-    if (result === 'done') doneCount++;
-    if (result === 'failed') failedCount++;
-  }
-
-  logger.info(
-    `\n[sarvam] Pass complete.` +
-    ` ${doneCount} done` +
-    (failedCount > 0 ? `, ${failedCount} failed (will be retried on the next run)` : '') +
-    '.'
-  );
-
-  logger.info(`\n[sarvam] All done. Transcripts saved under: output/<group>/<session-id>/transcripts/`);
+  return copy;
 }
 
-module.exports = { transcribeAll, resolveSessionForAudioFile };
+/** Combines offset chunk results into one Sarvam-shaped result. */
+function mergeChunkResults(results) {
+  const merged = {
+    language_code: results.find((r) => r.language_code)?.language_code || null,
+    transcript: results.map((r) => r.transcript).filter(Boolean).join(' '),
+  };
+  const entries = results.flatMap((r) => r.diarized_transcript?.entries || []);
+  if (entries.length) merged.diarized_transcript = { entries };
+  const ts = results.filter((r) => Array.isArray(r.timestamps?.chunks));
+  if (ts.length) {
+    merged.timestamps = {
+      chunks: ts.flatMap((r) => r.timestamps.chunks),
+      start_time_seconds: ts.flatMap((r) => r.timestamps.start_time_seconds),
+      end_time_seconds: ts.flatMap((r) => r.timestamps.end_time_seconds),
+    };
+  }
+  return merged;
+}
+
+/**
+ * Merges one chunked recording once every part is transcribed.
+ * @returns {'merged'|'done'|'waiting'}
+ */
+function mergeManifest(m) {
+  const dir = translateDir(m.group, m.effectiveSessionId);
+  const outJson = path.join(dir, `${m.originalBaseName}.json`);
+  if (fs.existsSync(outJson) || fs.existsSync(contextualTranscriptPath(m.group, m.effectiveSessionId, m.originalBaseName))) {
+    return 'done';
+  }
+
+  const results = [];
+  for (const c of m.chunks.slice().sort((a, b) => a.index - b.index)) {
+    const partJson = path.join(dir, `${path.basename(c.file, '.mp3')}.json`);
+    try {
+      results.push(offsetTimestamps(JSON.parse(fs.readFileSync(partJson, 'utf8')), c.startOffsetSeconds));
+    } catch {
+      return 'waiting'; // part missing or unreadable — next run picks it up
+    }
+  }
+  fs.writeFileSync(outJson, JSON.stringify(mergeChunkResults(results), null, 2), 'utf8');
+  logger.info(`  [transcribe] ✓ Merged ${results.length} chunk(s) → ${m.originalBaseName}`);
+  return 'merged';
+}
+
+// ─── Stage entry point ────────────────────────────────────────────────────────
+
+/**
+ * @returns {Promise<{done: number, skipped: number, failed: number, waiting: number}>}
+ */
+async function run() {
+  const audioDir = config.audioDir();
+  const items = await listAudioItems(audioDir);
+  const tally = { done: 0, skipped: 0, failed: 0, waiting: 0 };
+
+  // Work out what still needs Sarvam before touching the key pool.
+  const todo = items.filter(({ baseName, recording, session }) => {
+    const dir = translateDir(session.group, session.effectiveSessionId);
+    const finished = fs.existsSync(contextualTranscriptPath(session.group, session.effectiveSessionId, recording))
+      || fs.existsSync(path.join(dir, `${recording}.json`))   // merged / single transcript exists
+      || fs.existsSync(path.join(dir, `${baseName}.json`));   // this chunk part exists
+    if (finished) tally.skipped++;
+    return !finished;
+  });
+
+  if (todo.length > 0) {
+    const pool = new SarvamKeyPool();
+    if (pool.total === 0) throw new Error('No Sarvam keys found. Set SARVAM_API_KEYS in .env.');
+    logger.info(`[transcribe] ${todo.length} file(s) to transcribe · ${pool.total} key(s) in pool.`);
+
+    for (const { audioPath, baseName, session } of todo) {
+      const dir = translateDir(session.group, session.effectiveSessionId);
+      ensureDir(dir);
+      const label = `${session.group}/${session.effectiveSessionId}/${baseName}`;
+      const outcome = await withSarvamKeyRetry(pool, label, (client) =>
+        transcribeOne(client, audioPath, path.join(dir, `${baseName}.json`), label));
+      tally[outcome]++;
+    }
+  }
+
+  for (const m of listAllChunkManifests(audioDir)) {
+    if (mergeManifest(m) === 'waiting') tally.waiting++;
+  }
+
+  logger.info(`[transcribe] ${tally.done} transcribed, ${tally.skipped} skipped` +
+    (tally.failed ? `, ${tally.failed} failed (retried next run)` : '') +
+    (tally.waiting ? `, ${tally.waiting} chunked recording(s) waiting on parts` : '') + '.');
+  return tally;
+}
+
+module.exports = { run, mergeChunkResults, offsetTimestamps };
+
+if (require.main === module) {
+  run().catch((err) => {
+    logger.error('\n[fatal error]', err.message || err);
+    process.exit(1);
+  });
+}

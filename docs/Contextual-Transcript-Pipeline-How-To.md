@@ -1,41 +1,42 @@
 # Contextual Transcript Pipeline — How It Works
 
-Turns a Teams meeting recording into **one English transcript with on-screen context written in**. No meeting notes; the transcript itself carries the context.
+Turns a Teams meeting recording into **one English transcript with on-screen context written in**.
 
 ## 1. Setup
 
 1. Node.js 18+, then `npm install`.
 2. Copy `.env.example` to `.env` and set:
-   - `SARVAM_API_KEYS`: Sarvam key(s), comma-separated. The pipeline switches to the next key when one runs out of credit.
-   - `OPENAI_API_KEY` (+ optional `OPENAI_MODEL`): used for both screen-context stages.
-3. Drop recordings into `input/`. A sub-folder (e.g. `input/kyc/…`) becomes the group.
+   - `SARVAM_API_KEYS`: Sarvam key(s), comma-separated. When one runs out of credit, the next is used.
+   - `OPENAI_API_KEY` (+ optional `OPENAI_MODEL`): used for the screen context.
+3. Put recordings in a folder under `input/`. The folder is the group (e.g. `input/kyc/…` → group `kyc`); files at the `input/` root go to `ungrouped`.
 
-> Keep the original video in `input/` until the run finishes. Screen frames are taken from it.
+> Keep the original video in `input/` until its transcript is finished. Screen frames come from it.
 
 ## 2. Run
 
 ```
-npm run pipeline            # asks for budget consent, then runs everything
-npm run pipeline -- --yes   # no prompt (automation)
+npm run pipeline                               # checks status, asks for budget consent, runs
+npm run pipeline -- --yes                      # no budget prompt (automation)
+npm run pipeline -- --allow-missing-video      # finish video-less recordings without asking
 ```
 
-## 3. Stages
+## 3. What happens
 
-| # | Stage | Engine | What it does |
-|---|---|---|---|
-| 1 | convert | ffmpeg | Video → audio. Recordings over 60 min are split into chunks |
-| 2 | transcribe | Sarvam | Audio → English transcript with speakers (translate mode only) |
-| 3 | merge-chunks | local | Joins chunked recordings into one timeline |
-| 4 | context-scan | OpenAI (text) | Finds lines that need the screen to be understood ("this button", "that error") |
-| 5 | frame-capture | ffmpeg | Takes a frame from the video at each of those moments |
-| 6 | frame-describe | OpenAI (vision) | Writes a short pen picture of what the speaker points at |
-| 7 | context-inject | local | Places each description under its line and deletes all intermediates |
+| Step | Engine | What it does |
+|---|---|---|
+| Status | local | Sorts each recording: **done** (₹0), **transcribed** (OpenAI only), **new** (Sarvam + OpenAI) |
+| Missing videos | you | Lists transcribed recordings whose video is gone. **y** = finish without screen context, **N** = hold until you put the video back |
+| Budget | local | Estimates **pending work only**. No prompt when the total is ₹0 |
+| 1. convert | ffmpeg | Video → audio. Recordings over 60 min are split into chunks. Finished recordings are skipped |
+| 2. transcribe | Sarvam | Audio → English transcript with speakers. Chunked recordings are merged back into one timeline |
+| 3. context | OpenAI + ffmpeg | Finds lines that point at the screen, grabs those frames, writes a pen picture of each, puts it under its line, then deletes every intermediate (including the audio) |
+| Summary | local | Lists anything not finished and why |
 
-Every stage can also be run alone (`npm run context-scan`, etc.) and skips work that is already done.
+Each step can also be run alone: `npm run convert`, `npm run transcribe`, `npm run context`. Finished work is always skipped.
 
 ## 4. Output
 
-`output/<group>/<session-id>/<recording>-contextual.txt` is the **only** file left in a finished session folder.
+`output/<group>/<session-id>/<recording>-contextual.txt` is the only file left once a recording is finished.
 
 ```
 SCREEN  : 1 note(s) added (2 frame(s) requested, 1 not visible)
@@ -45,38 +46,29 @@ SCREEN  : 1 note(s) added (2 frame(s) requested, 1 not visible)
   [SCREEN @ 00:10] The 'Submit' CTA on the KYC page is grey instead of blue.
 ```
 
-The `SCREEN` header line always states the outcome:
-- `N note(s) added (…)`: context injected.
-- `none needed`: no line referred to the screen.
-- `unavailable — source video not found in input/`: transcript written without context.
+The `SCREEN` line in the header always states the outcome:
+- `N note(s) added (…)`: context was added.
+- `none needed`: no line pointed at the screen.
+- `unavailable — source video not found in input/`: you chose to finish without the video.
 
 ## 5. Edge cases
 
 | Situation | Behaviour |
 |---|---|
+| Recording already finished | Listed as done, costs ₹0, never converted or billed again |
 | Credits run out | Stops with exit code 2. Top up and re-run; finished work is kept |
-| Frame does not show what was asked | Nothing injected for that line; counted as "not visible" |
-| Frame description errors | Retried on the next run (2 attempts), then skipped and counted |
-| Re-run after completion | Nothing is re-billed; finished recordings are skipped at every stage |
+| Frame does not show what was asked | Nothing added for that line; counted as "not visible" |
+| Frame capture or description fails | Retried on the next run (2 attempts), then skipped and counted as failed |
+| Same file name in two group folders | The video in the recording's own group folder is used |
+| Two recordings from the same day in one group | Asked once: same session or separate (default separate) |
 | Speaker numbers across 60-min chunks | Not reconciled; each chunk is diarized on its own |
 
-## 6. Budget example (one 60-min recording)
+## 6. Budget example (one new 60-min recording)
 
 | Item | Estimate |
 |---|---|
 | Sarvam, 60 min × ₹45/hr | ₹45 |
-| OpenAI context scan | ≈ ₹0.3 |
-| OpenAI frames (10 assumed) | ≈ ₹0.2 |
+| OpenAI scan + 10 assumed frames | ≈ ₹0.5 |
 | **Total** | **≈ ₹45.5** |
 
-## 7. Old output folders (one-time)
-
-Sessions from the old notes pipeline still hold codemix, pure-english, notes, screenshots and exports.
-
-```
-npm run cleanup-legacy -- --dry-run   # list what would change
-npm run cleanup-legacy                # apply (asks y/N)
-npm run pipeline                      # rebuild them as contextual transcripts
-```
-
-The English Sarvam JSON is kept, so Sarvam is not billed again.
+The rates can be changed in `.env` (`SARVAM_PRICE_PER_HOUR_INR`, `USD_INR_RATE`, `OPENAI_PRICE_INPUT_PER_M`, `OPENAI_PRICE_OUTPUT_PER_M`, `OPENAI_ASSUMED_FRAMES_PER_SESSION`).

@@ -1,32 +1,14 @@
 'use strict';
 
 /**
- * config.js — single source of truth for environment-driven configuration.
- *
- * WHY THIS EXISTS:
- *   Every stage previously read process.env (and applied its own default) at
- *   module-load time — INPUT_DIR, AUDIO_DIR, OUTPUT_DIR, NUM_SPEAKERS, and the
- *   provider model names each existed in several places. If two stages ever disagreed on a
- *   default, behavior would drift silently. This module centralizes every
- *   knob; all accessors are LAZY (read at call time), so tests or callers can
- *   set process.env between calls and see the new value.
- *
- * ALL DEFAULTS (with the .env.example documentation) live here and nowhere
- * else. Provider model names are overridable via env:
- *   - SARVAM_MODEL      (default 'saaras:v3')
- *   - OPENAI_MODEL      (default 'gpt-5.6-luna')
+ * config.js — every environment-driven setting and its default, in one place.
+ * Accessors are lazy (read at call time).
  */
 
 const fs = require('fs');
 const path = require('path');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
-
-function num(name, fallback) {
-  const v = process.env[name];
-  const n = parseFloat(v);
-  return v != null && Number.isFinite(n) ? n : fallback;
-}
 
 function int(name, fallback) {
   const n = parseInt(process.env[name], 10);
