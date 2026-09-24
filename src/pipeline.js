@@ -8,77 +8,49 @@ const logger = require('./lib/logger');
  *                           — recordings over the chunk threshold (60 min
  *                           default) are auto-split into fixed-length audio
  *                           chunks here, see src/lib/chunking.js
- *   2. transcribe      audio  → English transcript   (src/index.js --transcribe-only)
- *                           — translate-only by DEFAULT (the Hinglish codemix
- *                           pass is opt-in via SARVAM_TRANSLATE_ONLY=0, see
- *                           src/lib/modes.js); chunk-aware; Sarvam keys come
- *                           from the shared pool (lib/sarvam-keys.js):
- *                           SARVAM_API_KEYS comma list first, falling back to
- *                           the legacy SARVAM_API_KEY / SARVAM_API_KEY_FALLBACK
- *                           pair. Keys rotate automatically mid-run on credit
- *                           exhaustion instead of stopping.
- *   3. merge-chunks     →  stitches any chunked recording's per-chunk
- *                           transcripts back into ONE continuous transcript,
- *                           timestamp-corrected (src/merge-chunks.js) — a
- *                           no-op for recordings that were never chunked.
- *                           Every stage after this one is chunking-unaware
- *                           by design: it only ever sees one transcript per
- *                           session, same as before chunking existed.
- *   4. pure-english     →  clean English transcript  (src/pure-english.js)
- *   5. meeting-notes    →  draft notes + vision-assist flags + structured
- *                           session-data.json, grouped so unrelated calls
- *                           never mix (src/meeting-notes.js) — this is
- *                           vision-assist Stage 2 (itself 2 DeepSeek calls
- *                           as of 2026-07-16: an index pass, then an
- *                           index-aware draft pass — see meeting-notes.js header)
- *   6. verify-notes     →  independent DeepSeek cross-check of each draft
- *                           against its full transcript, flagging possible
- *                           hallucinations/omissions to notes/verification.json
- *                           (src/verify-notes.js) — vision-assist Stage 2.5,
- *                           purely advisory, never auto-edits the draft
- *   7. vision-capture   →  targeted frame capture for flagged timestamps only
- *                           (src/vision-capture.js) — vision-assist Stage 3
- *   8. vision-caption   →  independent OpenAI captioning of captured frames
- *                           (src/vision-caption.js) — vision-assist Stage 4
- *   9. vision-patch     →  DeepSeek patches drafts into final.md, or copies
- *                           them through unpatched when there's nothing to
- *                           patch (src/vision-patch.js) — vision-assist Stage 5,
- *                           also appends a note if Stage 2.5 flagged anything
- *  10. export           →  final deliverable. DEFAULT: multi-sheet Excel
- *                           workbook from every session's structured data
- *                           (src/generate-xlsx.js), guaranteed to include
- *                           every problem/topic/gap as a row. With
- *                           --format md, a template-based markdown
- *                           consolidation instead (src/generate-md.js) — no
- *                           LLM call, just session-data.json rendered.
+ *   2. transcribe      audio  → English transcript JSON (src/index.js --transcribe-only)
+ *                           — Sarvam "translate" mode only (codemix removed);
+ *                           chunk-aware; keys come from the shared pool
+ *                           (lib/sarvam-keys.js) and rotate on credit exhaustion.
+ *   3. merge-chunks     →  stitches a chunked recording's per-chunk transcripts
+ *                           into ONE timestamp-corrected transcript
+ *                           (src/merge-chunks.js) — no-op otherwise.
+ *   4. context-scan     →  OpenAI reads the transcript (text only) and lists
+ *                           the lines that need the screen to be understood
+ *                           (src/context-scan.js)
+ *   5. frame-capture    →  ffmpeg grabs exactly those moments from the source
+ *                           video in input/ (src/frame-capture.js)
+ *   6. frame-describe   →  OpenAI vision writes a short pen picture of each
+ *                           frame (src/frame-describe.js)
+ *   7. context-inject   →  writes <name>-contextual.txt with each description
+ *                           under its line, then deletes every intermediate
+ *                           (src/context-inject.js)
  *
- * BUDGET CONSENT (stage 0, added 2026-08-06): before ANY stage runs — and
- * before any credit is spent — the pipeline probes the recordings in input/,
- * estimates the spend (Sarvam saaras:v3 at ₹45/hr of billed audio, DeepSeek
- * V4 Pro and OpenAI Luna token rates, all overridable via .env — see
- * src/lib/budget.js) and asks for a keyed y/N consent. The pipeline only
- * proceeds on an explicit "yes". Non-interactive runs refuse to spend unless
- * --yes is passed. Individual stage scripts (npm run meeting-notes, etc.)
- * are intentionally NOT gated — they're the manual resume path.
+ * FINAL OUTPUT: output/<group>/<session-id>/<name>-contextual.txt — the only
+ * file left in a finished session folder.
  *
- * Every stage is ALSO independently runnable via its own npm script — this
- * file is a convenience wrapper, not a replacement. Each stage has its own
- * resume logic, so re-running the pipeline after a partial failure only
- * redoes the work that didn't finish.
+ * BUDGET CONSENT (stage 0): before ANY stage runs — and before any credit is
+ * spent — the pipeline probes the recordings in input/, estimates the spend
+ * (Sarvam saaras:v3 at ₹45/hr of billed audio + OpenAI token rates, all
+ * overridable via .env — see src/lib/budget.js) and asks for a keyed y/N
+ * consent. Non-interactive runs refuse to spend unless --yes is passed.
+ * Individual stage scripts are intentionally NOT gated — they're the manual
+ * resume path.
+ *
+ * Every stage is ALSO independently runnable via its own npm script. Each has
+ * its own resume logic, so re-running after a partial failure only redoes the
+ * work that didn't finish.
  *
  * EXIT CODES:
  *   0 — everything finished
- *   1 — a stage crashed / config error / budget not approved (fix and re-run;
- *       resume logic skips done work)
- *   2 — stopped intentionally because credits ran out (all keys exhausted).
- *       Completed sessions are preserved; top up and re-run to continue.
+ *   1 — a stage crashed / config error / budget not approved
+ *   2 — stopped intentionally because credits ran out. Completed work is
+ *       preserved; top up and re-run to continue.
  *
  * Usage:
  *   node src/pipeline.js
- *   node src/pipeline.js --format md
  *   node src/pipeline.js --yes          (skip the budget consent — for automation)
  *   npm run pipeline
- *   npm run pipeline -- --format md
  */
 
 require('dotenv').config();
@@ -93,63 +65,28 @@ const { walkInputVideos } = require('./lib/input-walk');
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const INPUT_DIR = config.inputDir();
 
-const FORMAT = process.argv.includes('--format')
-  ? process.argv[process.argv.indexOf('--format') + 1] || 'xlsx'
-  : 'xlsx';
-if (FORMAT !== 'xlsx' && FORMAT !== 'md') {
-  logger.error(`[pipeline] Unknown --format "${FORMAT}" (expected "xlsx" or "md").`);
-  process.exit(1);
-}
-
-const UNTIL = process.argv.includes('--until')
-  ? process.argv[process.argv.indexOf('--until') + 1] || 'all'
-  : 'all';
-if (UNTIL !== 'all' && UNTIL !== 'transcript') {
-  logger.error(`[pipeline] Unknown --until "${UNTIL}" (expected "transcript" or "all").`);
-  process.exit(1);
-}
-
 // --yes: skip the budget consent (used for automation / unattended runs).
 const YES_FLAG = process.argv.includes('--yes');
 
-let STAGES = [
+const STAGES = [
   { name: 'convert',         script: 'src/index.js',           args: ['--convert-only'] },
   { name: 'transcribe',      script: 'src/index.js',           args: ['--transcribe-only'] },
-  { name: 'merge-chunks',    script: 'src/merge-chunks.js',     args: [] },
-  { name: 'pure-english',    script: 'src/pure-english.js',     args: [] },
-  { name: 'meeting-notes',   script: 'src/meeting-notes.js',    args: [] },
-  { name: 'verify-notes',    script: 'src/verify-notes.js',     args: [] },
-  { name: 'vision-capture',  script: 'src/vision-capture.js',   args: [] },
-  { name: 'vision-caption',  script: 'src/vision-caption.js',   args: [] },
-  { name: 'vision-patch',    script: 'src/vision-patch.js',     args: [] },
+  { name: 'merge-chunks',    script: 'src/merge-chunks.js',    args: [] },
+  { name: 'context-scan',    script: 'src/context-scan.js',    args: [] },
+  { name: 'frame-capture',   script: 'src/frame-capture.js',   args: [] },
+  { name: 'frame-describe',  script: 'src/frame-describe.js',  args: [] },
+  { name: 'context-inject',  script: 'src/context-inject.js',  args: [] },
 ];
-
-if (FORMAT === 'xlsx') {
-  STAGES.push({ name: 'export-xlsx', script: 'src/generate-xlsx.js', args: [] });
-} else {
-  STAGES.push({ name: 'export-md', script: 'src/generate-md.js', args: [] });
-}
-
-// --until transcript: stop after the final diarized English transcript
-// (convert → transcribe → merge-chunks → pure-english). Never reaches the
-// DeepSeek/OpenAI note + vision stages. --until all (default) runs everything.
-if (UNTIL === 'transcript') {
-  STAGES = STAGES.slice(0, 4);
-}
 
 const ENV_EXPECTATIONS = [
   {
     names: ['SARVAM_API_KEYS', 'SARVAM_API_KEY'],
-    why: 'Sarvam transcription (Stage 2) and the pure-English pass (Stage 4).',
+    why: 'Sarvam transcription (Stage 2).',
     url: 'https://dashboard.sarvam.ai/',
-  },  {
-    names: ['DEEPSEEK_API_KEY'],
-    why: 'meeting-notes (Stage 5), verify-notes (Stage 6) and vision-patch (Stage 9).',
-    url: 'https://platform.deepseek.com/',
   },
   {
     names: ['OPENAI_API_KEY'],
-    why: 'independent frame captioning (Stage 8, vision-caption).',
+    why: 'context scan (Stage 4) and frame description (Stage 6).',
     url: 'https://platform.openai.com/',
   },
 ];
@@ -208,11 +145,9 @@ function runStage(stage) {
 
 async function main() {
   logger.info('============================================================');
-  logger.info(' Application UX Pipeline — full run');
+  logger.info(' Application UX Pipeline — contextual transcripts');
   logger.info('============================================================');
   logger.info(' Stages: ' + STAGES.map((s) => s.name).join(' → '));
-  logger.info(' Export format: ' + FORMAT);
-  logger.info((UNTIL === 'transcript' ? ' Stop at   : transcript (final diarized English transcript)' : ' Stop at   : all stages'));
   if (YES_FLAG) logger.info(' Budget    : --yes passed — consent skipped');
 
   // ── Pre-flight: fail fast on missing env before any credits are spent ────
@@ -266,27 +201,9 @@ async function main() {
   }
 
   logger.info('\n============================================================');
-  if (UNTIL === 'transcript') {
-    logger.info(' Transcript stage complete. Final diarized English transcripts:');
-    logger.info('   output/<group>/<session-id>/transcripts/pure-english/*.txt');
-    logger.info(' (meeting-notes / verify / vision / export stages were NOT run.)');
-    logger.info('============================================================\n');
-    return;
-  }
-  logger.info(' Pipeline complete. See ./output for all artifacts:');
-  logger.info('   output/<group>/<session-id>/transcripts/{codemix,translate,pure-english}/');
-  logger.info('   output/<group>/<session-id>/notes/topic-index.json  — Stage 2a index (cached)');
-  logger.info('   output/<group>/<session-id>/notes/draft.md   — Stage 2b draft + flags');
-  logger.info('   output/<group>/<session-id>/notes/session-data.json — Stage 2b structured data');
-  logger.info('   output/<group>/<session-id>/notes/verification.json — Stage 2.5 advisory check');
-  logger.info('   output/<group>/<session-id>/notes/final.md   — Stage 5 patched, read this one');
-  logger.info('   output/<group>/<session-id>/screenshots/     — Stage 3 targeted vision-assist frames');
-  logger.info('   output/<group>/<session-id>/captions/        — Stage 4 per-frame captions');
-  if (FORMAT === 'xlsx') {
-    logger.info('   output/<group>/<group>-meeting-notes.xlsx    — one workbook per explicit group (export stage)');
-  } else {
-    logger.info('   output/<group>/<group>-meeting-notes.md      — one markdown consolidation per explicit group (export stage)');
-  }
+  logger.info(' Pipeline complete. Final contextual transcripts:');
+  logger.info('   output/<group>/<session-id>/<name>-contextual.txt');
+  logger.info(' (any recording still "waiting" finishes on the next run)');
   logger.info('============================================================\n');
 }
 

@@ -3,13 +3,12 @@
 /**
  * input-walk.js — recursive video discovery under input/, shared by:
  *   - src/lib/budget.js       (probe durations for the pre-run cost estimate)
- *   - src/vision-capture.js   (locate a session's source video even when it
+ *   - src/frame-capture.js    (locate a recording's source video even when it
  *                              lives in an input/<group>/ sub-folder)
  *
  * WHY RECURSIVE:
- *   convert.js has always treated a sub-folder under input/ AS a group. The
- *   old vision-capture.js lookup only searched the input/ root flat, so a
- *   grouped video could never be found for flagged-frame capture. Both
+ *   convert.js has always treated a sub-folder under input/ AS a group. A flat
+ *   root-only lookup could never find a grouped video for frame capture. Both
  *   consumers now use this one walker so they agree on where videos live.
  */
 

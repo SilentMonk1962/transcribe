@@ -46,6 +46,7 @@ stt-eval/
 **/captions/
 **/notes/
 **/screenshots/
+**/_work/
 **/master-meeting-notes*.md
 **/*-meeting-notes.md
 **/*-meeting-notes.xlsx

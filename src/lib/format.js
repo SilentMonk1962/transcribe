@@ -4,13 +4,9 @@
  * format.js — shared formatting utilities used across multiple pipeline stages.
  *
  * Consolidates:
- *   - formatTime()          (was duplicated in transcribe.js, pure-english.js, vision-patch.js)
- *   - formatMMSS()          (meeting-notes.js)
- *   - formatLabel()         (vision-capture.js)
- *   - createDeepSeekClient()(was duplicated in meeting-notes.js, verify-notes.js, vision-patch.js)
+ *   - formatTime()   (transcript timings — transcript-format.js, context-scan.js)
+ *   - formatLabel()  (frame filenames — frame-capture.js)
  */
-
-const OpenAI = require('openai');
 
 /**
  * Converts a float seconds value to MM:SS string.
@@ -38,17 +34,4 @@ function formatLabel(seconds) {
   return `${h}-${m}-${s}`;
 }
 
-/**
- * Creates an OpenAI-compatible client pointing at the DeepSeek API.
- *
- * @param {string} apiKey - DeepSeek API key
- * @returns {OpenAI}
- */
-function createDeepSeekClient(apiKey) {
-  return new OpenAI({
-    apiKey,
-    baseURL: 'https://api.deepseek.com',
-  });
-}
-
-module.exports = { formatTime, formatLabel, createDeepSeekClient };
+module.exports = { formatTime, formatLabel };

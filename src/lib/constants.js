@@ -4,7 +4,7 @@
  * constants.js — shared constants used by multiple pipeline stages.
  *
  * Eliminates duplication of VIDEO_EXTENSIONS between convert.js and
- * vision-capture.js.
+ * input-walk.js (used by frame-capture.js).
  */
 
 /** Supported video container formats to scan in ./input/ */

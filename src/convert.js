@@ -71,7 +71,7 @@ async function convertAll(inputDir, audioDir) {
   }
 
   // Recursively find all video files in inputDir (shared walker from
-  // lib/input-walk.js, which also powers budget.js and vision-capture.js).
+  // lib/input-walk.js, which also powers budget.js and frame-capture.js).
   // A sub-folder under input/ IS a group: the folder name becomes the group
   // slug, and every video inside it belongs to that group. Videos at the
   // input/ root fall into the default "ungrouped" bucket, each kept as its
@@ -96,7 +96,7 @@ async function convertAll(inputDir, audioDir) {
 
     // Group comes from the sub-folder the video sits in ("" = input/ root →
     // default ungrouped). Explicit group is persisted by resolveSession() so
-    // every later stage (transcribe/pure-english/meeting-notes) reuses it.
+    // every later stage (transcribe/merge-chunks/context-*) reuses it.
     const explicitGroup = relDir && relDir.length > 0
       ? relDir
       : DEFAULT_GROUP;
@@ -157,7 +157,7 @@ async function convertAll(inputDir, audioDir) {
         });
         // Remove the full intermediate file now that chunks exist — it must
         // not sit flat in audioDir, or later stages' flat *.mp3 scans
-        // (index.js --transcribe-only resume, pure-english.js) would treat
+        // (index.js --transcribe-only resume) would treat
         // it as a THIRD, redundant copy of this recording alongside its
         // chunks.
         fs.unlinkSync(result);

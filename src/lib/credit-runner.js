@@ -3,14 +3,11 @@
 /**
  * credit-runner.js — shared credit-safety orchestration for every paid-API
  * stage. Extracts the retry/rotate/exit pattern that used to be copy-pasted
- * across six stage files:
+ * across the paid-API stage files:
  *
  *   1. transcribe.js      — Sarvam, with a rotating key pool (withSarvamKeyRetry)
- *   2. pure-english.js    — Sarvam, with a rotating key pool (withSarvamKeyRetry)
- *   3. meeting-notes.js   — DeepSeek, no pool (exitOnCreditExhaustion)
- *   4. verify-notes.js    — DeepSeek, no pool (exitOnCreditExhaustion)
- *   5. vision-caption.js  — OpenAI,   no pool (exitOnCreditExhaustion)
- *   6. vision-patch.js    — DeepSeek, no pool (exitOnCreditExhaustion)
+ *   2. context-scan.js    — OpenAI, no pool (exitOnCreditExhaustion)
+ *   3. frame-describe.js  — OpenAI, no pool (exitOnCreditExhaustion)
  *
  * EXIT-CODE CONTRACT (shared with pipeline.js): every stage that runs out of
  * credits exits with code 2 — "stopped intentionally, top up and re-run" —
@@ -85,8 +82,7 @@ async function withSarvamKeyRetry({
 }
 
 /**
- * Handles a caught credit error for stages WITHOUT a key pool (DeepSeek,
- * OpenAI): prints the clean resume box and exits with code 2. Returns false
+ * Handles a caught credit error for stages WITHOUT a key pool (OpenAI): prints the clean resume box and exits with code 2. Returns false
  * (and does nothing) when `err` is NOT a credit error, so callers can write
  * `if (exitOnCreditExhaustion(err, opts)) return;` or fall through to rethrow.
  *
