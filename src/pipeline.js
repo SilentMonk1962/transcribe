@@ -76,11 +76,12 @@ async function main() {
   const missing = items.filter((r) => r.state === 'transcribed' && !r.videoPath);
   let allowMissingVideo = ALLOW_MISSING_FLAG;
   if (missing.length && !allowMissingVideo) {
-    logger.warn(`\n[status] ${missing.length} recording(s) have no source video in ${config.inputDir()}:`);
+    logger.warn(`\n[status] ${missing.length} recording(s) are ALREADY TRANSCRIBED — no re-transcription, no Sarvam cost.`);
+    logger.warn('[status] Only screen context is missing: their source video is not in ' + config.inputDir());
     missing.forEach((r) => logger.warn(`   • ${label(r)}`));
-    allowMissingVideo = await askYesNo(
-      'Finish these WITHOUT screen context? (N = hold them until you put the videos back)'
-    );
+    logger.warn('   y = write their final transcripts now, without screen context (₹0)');
+    logger.warn('   N = hold them until you put the videos back in input/<group>/');
+    allowMissingVideo = await askYesNo('Finish them without screen context?');
     logger.info(allowMissingVideo ? '[status] Will finish them without screen context.' : '[status] Holding them.');
   }
 
